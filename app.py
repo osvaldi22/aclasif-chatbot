@@ -1,6 +1,10 @@
 import os
 import uuid
+import re
 import requests
+import base64
+from io import BytesIO
+from PIL import Image
 from datetime import datetime, timezone
 from flask import Flask, request, jsonify
 from flask_cors import CORS
@@ -20,6 +24,7 @@ SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 
 # ---------- TELEGRAM ----------
+# NO TOCAR: estos datos son los que ya te funcionaban.
 TELEGRAM_BOT_TOKEN = "8753872074:AAFub-e8qrfNhVvcLX46Kb_jpLUBzlSAJLA"
 TELEGRAM_ADMIN_BOT_TOKEN = "8753184281:AAEaPQSD93oiRRkankYiVGY863pyvduuveA"
 TELEGRAM_ADMIN_CHAT_ID = "1857096780"
@@ -77,30 +82,42 @@ def valor_limpio(*valores, default="No especificado"):
             return texto
     return default
 
+
 def normalizar_texto(valor):
     return str(valor or "").strip()
+
 
 def formatear_precio(valor):
     if valor is None:
         return "No especificado"
+
     texto = str(valor).strip()
+
     if not texto or texto.lower() in ["none", "null", "nan"]:
         return "No especificado"
+
     if "Gs" in texto or "₲" in texto or "USD" in texto or "$" in texto:
         return texto
+
     texto_num = texto.replace(".", "", texto.count(".") - 1) if texto.count(".") > 1 else texto
     texto_num = texto_num.replace(",", ".")
+
     try:
         numero = float(texto_num)
+
         if numero.is_integer():
             return f"Gs. {int(numero):,}".replace(",", ".")
+
         return f"Gs. {numero:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
     except:
         return texto
+
 
 def crear_contexto_compra_texto(compra):
     if not compra:
         return ""
+
     return f"""
 CONTEXTO INTERNO DE LA COMPRA ACTUAL:
 - N° de Orden: {compra.get("order", "No especificado")}
@@ -115,6 +132,7 @@ CONTEXTO INTERNO DE LA COMPRA ACTUAL:
 - WhatsApp vendedor: {compra.get("vendedor_whatsapp", "No especificado")}
 """
 
+
 def consultar_deepseek(mensaje, session_id, extra_context=""):
     if session_id not in conversaciones:
         conversaciones[session_id] = {
@@ -123,31 +141,66 @@ def consultar_deepseek(mensaje, session_id, extra_context=""):
             "user_id": None,
             "compra": None
         }
+
     sesion = conversaciones[session_id]
     sesion["ultimo_mensaje"] = datetime.now(timezone.utc).isoformat()
+
     messages = [{"role": "system", "content": SYSTEM_PROMPT + extra_context}]
+
     for msg in sesion["mensajes"][-10:]:
         messages.append(msg)
+
     messages.append({"role": "user", "content": mensaje})
 
-    headers = {"Authorization": f"Bearer {DEEPSEEK_API_KEY}", "Content-Type": "application/json"}
-    payload = {"model": "deepseek-chat", "messages": messages, "temperature": 0.3, "max_tokens": 500}
+    headers = {
+        "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+        "Content-Type": "application/json"
+    }
 
-    resp = requests.post("https://api.deepseek.com/v1/chat/completions", json=payload, headers=headers, timeout=30)
+    payload = {
+        "model": "deepseek-chat",
+        "messages": messages,
+        "temperature": 0.3,
+        "max_tokens": 500
+    }
+
+    resp = requests.post(
+        "https://api.deepseek.com/v1/chat/completions",
+        json=payload,
+        headers=headers,
+        timeout=30
+    )
+
     resp.raise_for_status()
     respuesta = resp.json()["choices"][0]["message"]["content"]
 
     sesion["mensajes"].append({"role": "user", "content": mensaje})
     sesion["mensajes"].append({"role": "assistant", "content": respuesta})
+
     return respuesta
+
 
 def notificar_telegram(mensaje):
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_ADMIN_BOT_TOKEN}/sendMessage"
-        resp = requests.post(url, json={"chat_id": TELEGRAM_ADMIN_CHAT_ID, "text": mensaje, "parse_mode": "HTML"}, timeout=10)
+
+        resp = requests.post(
+            url,
+            json={
+                "chat_id": TELEGRAM_ADMIN_CHAT_ID,
+                "text": mensaje,
+                "parse_mode": "HTML"
+            },
+            timeout=10
+        )
+
+        print("📨 Telegram:", resp.status_code, resp.text)
         return resp.status_code == 200
-    except:
+
+    except Exception as e:
+        print("❌ Error Telegram:", e)
         return False
+
 
 # ---------------------------
 # ENDPOINTS DEL CHAT
@@ -156,145 +209,372 @@ def notificar_telegram(mensaje):
 @app.route("/api/chat-web", methods=["POST"])
 def chat_web():
     data = request.json or {}
+
     mensaje = data.get("mensaje", "")
     session_id = data.get("session_id", "anon")
     user_id = data.get("user_id", None)
 
     if session_id not in conversaciones:
-        conversaciones[session_id] = {"mensajes": [], "ultimo_mensaje": datetime.now(timezone.utc).isoformat(), "user_id": user_id, "compra": None}
+        conversaciones[session_id] = {
+            "mensajes": [],
+            "ultimo_mensaje": datetime.now(timezone.utc).isoformat(),
+            "user_id": user_id,
+            "compra": None
+        }
 
     sesion = conversaciones[session_id]
     sesion["ultimo_mensaje"] = datetime.now(timezone.utc).isoformat()
-    if user_id: sesion["user_id"] = user_id
+
+    if user_id:
+        sesion["user_id"] = user_id
 
     try:
-        respuesta = consultar_deepseek(mensaje, session_id, crear_contexto_compra_texto(sesion.get("compra")))
+        respuesta = consultar_deepseek(
+            mensaje,
+            session_id,
+            crear_contexto_compra_texto(sesion.get("compra"))
+        )
+
     except Exception as e:
+        print("Error DeepSeek chat:", e)
         respuesta = "Lo siento, tuve un problema de conexión. ¿Me repetís kape?"
 
     palabras_reclamo = ["reclamo", "estafa", "no recibí", "abogado", "devuelvan", "reembolso"]
+
     if any(p in mensaje.lower() for p in palabras_reclamo):
-        notificar_telegram(f"🚨 <b>RECLAMO URGENTE</b>\nSesión: {session_id}\nMensaje: {mensaje[:200]}")
+        notificar_telegram(
+            f"🚨 <b>RECLAMO URGENTE</b>\nSesión: {session_id}\nMensaje: {mensaje[:200]}"
+        )
 
     return jsonify({"respuesta": respuesta})
+
 
 @app.route("/api/historial/<session_id>", methods=["GET"])
 def obtener_historial(session_id):
     sesion = conversaciones.get(session_id)
-    if not sesion: return jsonify({"messages": []})
+
+    if not sesion:
+        return jsonify({"messages": []})
+
     return jsonify({"messages": sesion["mensajes"]})
 
+
 # ---------------------------
-# OCR (NUBE) + MODERACIÓN
+# MODERACIÓN BLINDADA
 # ---------------------------
+
+def detectar_contacto_regex(texto):
+    """
+    Primer filtro duro.
+    Esto no depende de IA.
+    Si encuentra contacto evidente o camuflado, suspende directo.
+    """
+    if not texto:
+        return False, ""
+
+    original = texto
+    t = texto.lower()
+
+    palabras_bloqueadas = [
+        "whatsapp", "wpp", "wasap", "wa.me", "teléfono", "telefono", "tel ",
+        "celular", "llamame", "llámame", "contactame", "contáctame",
+        "escribime", "escríbeme", "mensajeame", "mi numero", "mi número",
+        "gmail", "hotmail", "outlook", "yahoo", ".com", "@gmail", "@hotmail",
+        "instagram", "insta", "facebook", "telegram", "t.me", "fb", "ig",
+        "seguime", "inbox", "dm", "directo", "direct"
+    ]
+
+    for palabra in palabras_bloqueadas:
+        if palabra in t:
+            return True, f"Contiene palabra o contacto externo: {palabra}"
+
+    if re.search(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}", original):
+        return True, "Contiene email"
+
+    if re.search(r"(https?://|www\.|wa\.me/|t\.me/)", t):
+        return True, "Contiene link externo"
+
+    compactado = re.sub(r"[\s\-\.\(\)\+_/,:;|]+", "", original)
+
+    if re.search(r"\d{7,}", compactado):
+        return True, "Contiene número largo tipo teléfono"
+
+    if re.search(r"(09\d{7,9}|595\d{8,10}|0\s*9\s*\d)", compactado):
+        return True, "Contiene número paraguayo o WhatsApp"
+
+    palabras_numeros = [
+        "cero", "uno", "dos", "tres", "cuatro", "cinco",
+        "seis", "siete", "ocho", "nueve"
+    ]
+
+    contador_palabras_numero = sum(1 for p in palabras_numeros if p in t)
+
+    if contador_palabras_numero >= 4:
+        return True, "Contiene número escrito en palabras"
+
+    return False, ""
+
 
 def extraer_texto_de_imagen(image_url: str) -> str:
     try:
-        print("📸 Leyendo imagen con Radar Cloud OCR...")
-        api_url = "https://api.ocr.space/parse/imageurl"
-        payload = {"apikey": "helloworld", "url": image_url, "language": "spa", "isOverlayRequired": False}
-        resp = requests.post(api_url, data=payload, timeout=20)
+        print("📸 Descargando imagen para OCR...")
+        img_resp = requests.get(image_url, timeout=15)
+        img_resp.raise_for_status()
+
+        img = Image.open(BytesIO(img_resp.content))
+
+        if img.mode != "RGB":
+            img = img.convert("RGB")
+
+        img.thumbnail((1400, 1400))
+
+        buffer = BytesIO()
+        img.save(buffer, format="JPEG", quality=90)
+
+        imagen_b64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
+        base64_str = f"data:image/jpeg;base64,{imagen_b64}"
+
+        print("🔍 Analizando imagen con OCR.space...")
+        api_url = "https://api.ocr.space/parse/image"
+
+        payload = {
+            "apikey": os.environ.get("OCR_SPACE_API_KEY", "helloworld"),
+            "base64Image": base64_str,
+            "language": "spa",
+            "isOverlayRequired": False,
+            "scale": True,
+            "OCREngine": 2
+        }
+
+        resp = requests.post(api_url, data=payload, timeout=30)
         resp.raise_for_status()
+
         resultado = resp.json()
-        
+
         if resultado.get("IsErroredOnProcessing"):
+            msg_error = resultado.get("ErrorMessage", "Error OCR desconocido")
+            print(f"❌ OCR devolvió error interno: {msg_error}")
             return ""
 
-        textos = [item.get("ParsedText", "") for item in resultado.get("ParsedResults", []) if item.get("ParsedText")]
+        textos = []
+
+        for item in resultado.get("ParsedResults", []):
+            parsed = item.get("ParsedText", "")
+            if parsed:
+                textos.append(parsed)
+
         texto_final = " ".join(textos).strip()
+
         print(f"👀 TEXTO EXTRAÍDO DE LA IMAGEN: {texto_final}")
         return texto_final
+
     except Exception as e:
-        print(f"❌ Error OCR en la nube: {e}")
+        print(f"❌ Error crítico en OCR: {e}")
         return ""
 
+
 def analizar_imagen_con_deepseek(image_url):
-    if not image_url: return "APROBAR", ""
+    """
+    Regla nueva:
+    - Si no hay imagen: pendiente, no aprobar automático.
+    - Si OCR falla o no lee texto: pending, no aprobar automático.
+    - Si regex detecta contacto: suspended directo.
+    - Si IA detecta contacto: suspended.
+    """
+    if not image_url:
+        return "PENDIENTE", "Sin imagen para verificar"
+
     texto_extraido = extraer_texto_de_imagen(image_url)
-    if not texto_extraido: return "APROBAR", ""
+
+    if not texto_extraido:
+        return "PENDIENTE", "OCR no pudo leer texto de la imagen. Revisión manual necesaria."
+
+    contacto, motivo_regex = detectar_contacto_regex(texto_extraido)
+
+    if contacto:
+        return "SUSPENDER", f"Imagen: {motivo_regex}"
 
     prompt = f"""Analiza el siguiente texto extraído de la imagen de un producto.
-Tu objetivo es ser EXTREMADAMENTE ESTRICTO, IMPLACABLE, y detectar DATOS DE CONTACTO PERSONALES.
+Tu objetivo es ser EXTREMADAMENTE ESTRICTO y detectar DATOS DE CONTACTO PERSONALES.
 
-TEXTO EXTRAÍDO: {texto_extraido}
+TEXTO EXTRAÍDO:
+{texto_extraido}
 
-REGLAS ESTRICTAS - DEBES SUSPENDER INMEDIATAMENTE SI HAY:
-1. Números de teléfono o WhatsApp (ej. 0981, 0994, +595...).
-2. Números camuflados con símbolos o espacios (ej. 0.9.5..5, 0-9-8, 0 9 8 1, cero nueve ocho).
-3. Nombres de redes sociales (Instagram, Facebook, Telegram, @usuario, fb, ig).
-4. Direcciones físicas, emails, o links a otras webs.
-5. Frases que inviten al contacto externo (ej. "contactame", "escribime al", "mi numero").
+DEBES SUSPENDER SI HAY:
+1. Números de teléfono o WhatsApp.
+2. Números camuflados con símbolos, espacios o palabras.
+3. Emails.
+4. Links externos.
+5. Instagram, Facebook, Telegram, @usuario, redes sociales.
+6. Frases como contactame, escribime, mi número, mi WhatsApp, inbox, DM.
 
-Responde EXACTAMENTE en este formato:
-- "APROBAR" (solo si el texto es descriptivo del producto y no tiene NADA de contacto).
-- "SUSPENDER: [motivo detallado]" (si hay cualquier dato de contacto o intento de evasión).
+Responde EXACTAMENTE:
+APROBAR
+SUSPENDER: motivo
 """
-    headers = {"Authorization": f"Bearer {DEEPSEEK_API_KEY}", "Content-Type": "application/json"}
-    payload = {"model": "deepseek-chat", "messages": [{"role": "system", "content": "Eres un moderador estricto. Solo respondes APROBAR o SUSPENDER."}, {"role": "user", "content": prompt}], "temperature": 0.1, "max_tokens": 100}
+
+    headers = {
+        "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+        "Content-Type": "application/json"
+    }
+
+    payload = {
+        "model": "deepseek-chat",
+        "messages": [
+            {
+                "role": "system",
+                "content": "Eres un moderador estricto. Solo respondes APROBAR o SUSPENDER."
+            },
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ],
+        "temperature": 0,
+        "max_tokens": 120
+    }
 
     try:
-        resp = requests.post("https://api.deepseek.com/v1/chat/completions", json=payload, headers=headers, timeout=20)
+        resp = requests.post(
+            "https://api.deepseek.com/v1/chat/completions",
+            json=payload,
+            headers=headers,
+            timeout=25
+        )
+
         resp.raise_for_status()
         respuesta = resp.json()["choices"][0]["message"]["content"].strip()
+
         print(f"🤖 Decisión IA Imagen: {respuesta}")
 
         if respuesta.upper().startswith("SUSPENDER"):
-            motivo = respuesta.split(":", 1)[1].strip() if ":" in respuesta else "Contacto oculto en imagen."
+            motivo = respuesta.split(":", 1)[1].strip() if ":" in respuesta else "Contacto oculto en imagen"
             return "SUSPENDER", motivo
-        return "APROBAR", ""
+
+        if respuesta.upper().startswith("APROBAR"):
+            return "APROBAR", "Imagen aprobada"
+
+        return "PENDIENTE", f"Respuesta IA imagen no clara: {respuesta}"
+
     except Exception as e:
-        return "APROBAR", ""
+        print("❌ Error IA imagen:", e)
+        return "PENDIENTE", f"Error IA imagen: {str(e)}"
+
 
 def analizar_listing_con_deepseek(title, description, image_url=None):
-    decision_imagen, motivo_imagen = "APROBAR", ""
-    if image_url: decision_imagen, motivo_imagen = analizar_imagen_con_deepseek(image_url)
+    """
+    Moderación final:
+    - Regex texto primero.
+    - Imagen después.
+    - IA texto después.
+    - Si algo falla: pending, no verified.
+    """
+    texto_total = f"{title}\n{description}"
+
+    contacto_texto, motivo_texto_regex = detectar_contacto_regex(texto_total)
+
+    if contacto_texto:
+        return "suspended", f"Texto: {motivo_texto_regex}"
+
+    decision_imagen, motivo_imagen = analizar_imagen_con_deepseek(image_url)
+
+    if decision_imagen == "SUSPENDER":
+        return "suspended", f"Imagen: {motivo_imagen}"
+
+    if decision_imagen == "PENDIENTE":
+        return "pending", motivo_imagen
 
     prompt = f"""Eres un moderador automático IMPLACABLE de Aclasif.
 Detecta DATOS DE CONTACTO PERSONALES DIRECTOS O CAMUFLADOS en el título/descripción.
 
-TÍTULO: {title}
-DESCRIPCIÓN: {description}
+TÍTULO:
+{title}
 
-REGLAS ESTRICTAS - SUSPENDER INMEDIATAMENTE SI HAY:
-1. Teléfonos/WhatsApp (ej. "0981123456", "+595 994...").
-2. Números camuflados (ej. "0.9.8.1...", "cero nueve ocho...", "0-9-8-...", "0981 y 123 y 456").
-3. Redes sociales o links: instagram, ig, facebook, fb, @usuario, t.me, telegram.
-4. Frases de contacto directo: "escribime", "contactame al", "mi whatsapp", "mi numero es".
-5. Direcciones exactas intentando evadir la plataforma.
+DESCRIPCIÓN:
+{description}
+
+SUSPENDER SI HAY:
+1. Teléfonos o WhatsApp.
+2. Números camuflados.
+3. Redes sociales o links.
+4. Emails.
+5. Frases de contacto directo.
+6. Direcciones exactas para evitar la plataforma.
 
 Responde EXACTAMENTE:
-- "APROBAR" (solo si el texto está 100% limpio)
-- "SUSPENDER: [motivo]" (si encuentras el más mínimo intento de contacto)
+APROBAR
+SUSPENDER: motivo
 """
-    headers = {"Authorization": f"Bearer {DEEPSEEK_API_KEY}", "Content-Type": "application/json"}
-    payload = {"model": "deepseek-chat", "messages": [{"role": "system", "content": "Solo respondes APROBAR o SUSPENDER."}, {"role": "user", "content": prompt}], "temperature": 0.1, "max_tokens": 100}
+
+    headers = {
+        "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+        "Content-Type": "application/json"
+    }
+
+    payload = {
+        "model": "deepseek-chat",
+        "messages": [
+            {
+                "role": "system",
+                "content": "Solo respondes APROBAR o SUSPENDER."
+            },
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ],
+        "temperature": 0,
+        "max_tokens": 120
+    }
 
     try:
-        resp = requests.post("https://api.deepseek.com/v1/chat/completions", json=payload, headers=headers, timeout=20)
+        resp = requests.post(
+            "https://api.deepseek.com/v1/chat/completions",
+            json=payload,
+            headers=headers,
+            timeout=25
+        )
+
         resp.raise_for_status()
         respuesta = resp.json()["choices"][0]["message"]["content"].strip()
+
         print(f"🤖 Decisión IA Texto: {respuesta}")
 
-        if decision_imagen == "SUSPENDER": return "suspended", f"Imagen: {motivo_imagen}"
-        elif respuesta.upper().startswith("SUSPENDER"):
-            motivo = respuesta.split(":", 1)[1].strip() if ":" in respuesta else "Contacto en texto."
+        if respuesta.upper().startswith("SUSPENDER"):
+            motivo = respuesta.split(":", 1)[1].strip() if ":" in respuesta else "Contacto en texto"
             return "suspended", f"Texto: {motivo}"
-        else: return "verified", "Aprobado automáticamente."
+
+        if respuesta.upper().startswith("APROBAR"):
+            return "verified", "Aprobado automáticamente por texto e imagen."
+
+        return "pending", f"Respuesta IA texto no clara: {respuesta}"
+
     except Exception as e:
-        return "pending", f"Error IA: {str(e)}"
+        print("❌ Error IA texto:", e)
+        return "pending", f"Error IA texto: {str(e)}"
+
 
 @app.route("/api/moderar-listing", methods=["POST"])
 def moderar_listing():
     data = request.json or {}
     listing_id = data.get("listing_id")
-    if not listing_id: return jsonify({"success": False, "error": "Falta listing_id"}), 400
+
+    if not listing_id:
+        return jsonify({"success": False, "error": "Falta listing_id"}), 400
 
     try:
         listing_resp = supabase.table("listings").select("*").eq("id", listing_id).single().execute()
-        if not listing_resp.data: return jsonify({"success": False, "error": "No encontrado"}), 404
+
+        if not listing_resp.data:
+            return jsonify({"success": False, "error": "No encontrado"}), 404
+
         listing = listing_resp.data
 
-        decision, nota = analizar_listing_con_deepseek(listing.get("title", ""), listing.get("description", ""), listing.get("image_url", ""))
+        decision, nota = analizar_listing_con_deepseek(
+            listing.get("title", ""),
+            listing.get("description", ""),
+            listing.get("image_url", "")
+        )
 
         update_data = {
             "moderation_status": decision,
@@ -302,14 +582,54 @@ def moderar_listing():
             "is_active": decision == "verified",
             "last_reviewed_at": datetime.now(timezone.utc).isoformat()
         }
-        if decision == "verified": update_data["verified_at"] = datetime.now(timezone.utc).isoformat()
-        
+
+        if decision == "verified":
+            update_data["verified_at"] = datetime.now(timezone.utc).isoformat()
+
         supabase.table("listings").update(update_data).eq("id", listing_id).execute()
 
-        if decision == "pending": notificar_telegram(f"⚠️ Publicación pendiente\nTítulo: {listing.get('title', '')}\nID: {listing_id}")
-        return jsonify({"success": True, "listing_id": listing_id, "decision": decision, "nota": nota})
+        if decision == "suspended":
+            notificar_telegram(
+                f"🚫 <b>PUBLICACIÓN SUSPENDIDA POR IA</b>\n"
+                f"Producto: {listing.get('title', '')}\n"
+                f"ID: {listing_id}\n"
+                f"Motivo: {nota}"
+            )
+
+        if decision == "pending":
+            notificar_telegram(
+                f"⚠️ <b>PUBLICACIÓN PENDIENTE DE REVISIÓN</b>\n"
+                f"Producto: {listing.get('title', '')}\n"
+                f"ID: {listing_id}\n"
+                f"Motivo: {nota}"
+            )
+
+        return jsonify({
+            "success": True,
+            "listing_id": listing_id,
+            "decision": decision,
+            "nota": nota
+        })
+
     except Exception as e:
-        return jsonify({"success": False, "error": str(e)}), 500
+        print("❌ Error moderar_listing:", e)
+
+        try:
+            supabase.table("listings").update({
+                "moderation_status": "pending",
+                "moderation_note": f"Error moderación backend: {str(e)}",
+                "is_active": False,
+                "last_reviewed_at": datetime.now(timezone.utc).isoformat()
+            }).eq("id", listing_id).execute()
+        except:
+            pass
+
+        return jsonify({
+            "success": False,
+            "error": str(e),
+            "decision": "pending"
+        }), 500
+
 
 # ---------------------------
 # WEBHOOK TELEGRAM PÚBLICO
@@ -318,123 +638,249 @@ def moderar_listing():
 @app.route("/webhook/telegram", methods=["POST"])
 def webhook_telegram():
     data = request.json or {}
-    if "message" not in data: return "OK", 200
+
+    if "message" not in data:
+        return "OK", 200
+
     chat_id = data["message"]["chat"]["id"]
     texto = data["message"].get("text", "")
 
     try:
         respuesta = consultar_deepseek(texto, chat_id, "")
+
         if TELEGRAM_BOT_TOKEN:
-            requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", json={"chat_id": chat_id, "text": respuesta, "parse_mode": "HTML"}, timeout=10)
-    except:
-        pass
+            requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                json={
+                    "chat_id": chat_id,
+                    "text": respuesta,
+                    "parse_mode": "HTML"
+                },
+                timeout=10
+            )
+
+    except Exception as e:
+        print("Error Telegram webhook:", e)
+
     return "OK", 200
 
+
 # ---------------------------
-# COMPRA / TELEGRAM / SUPABASE (RESTO DEL CÓDIGO)
+# COMPRA / TELEGRAM / SUPABASE
 # ---------------------------
-# *Para ahorrar espacio visual te omito las funciones buscar_order y buscar_listing que ya estaban perfectas, pero tu servidor ahora es 100% compatible con Cloud OCR.*
 
 def buscar_order(order):
     order = normalizar_texto(order)
-    if not order or order.lower() in ["ninguna", "no especificado"]: return None
+
+    if not order or order.lower() in ["ninguna", "no especificado"]:
+        return None
+
     columnas_orden = ["order_number", "id", "idx", "order", "order_id", "numero_orden", "nro_orden"]
+
     for columna in columnas_orden:
         try:
             res = supabase.table("orders").select("*").eq(columna, order).limit(1).execute()
-            if res.data: return res.data[0]
-        except: pass
+
+            if res.data:
+                return res.data[0]
+
+        except:
+            pass
+
         try:
             if str(order).isdigit():
                 res = supabase.table("orders").select("*").eq(columna, int(order)).limit(1).execute()
-                if res.data: return res.data[0]
-        except: pass
+
+                if res.data:
+                    return res.data[0]
+
+        except:
+            pass
+
     return None
+
 
 def buscar_listing_por_id(listing_id):
     listing_id = normalizar_texto(listing_id)
-    if not listing_id: return None
+
+    if not listing_id:
+        return None
+
     try:
         res = supabase.table("listings").select("*").eq("id", listing_id).limit(1).execute()
-        if res.data: return res.data[0]
-    except: pass
+
+        if res.data:
+            return res.data[0]
+
+    except:
+        pass
+
     return None
+
 
 def buscar_listing(producto="", article_code="", order=""):
     producto = normalizar_texto(producto)
     article_code = normalizar_texto(article_code)
     order = normalizar_texto(order)
+
     orden_data = buscar_order(order)
 
     if orden_data:
-        posibles_listing_id = [orden_data.get("listing_id"), orden_data.get("listingId"), orden_data.get("product_id")]
+        posibles_listing_id = [
+            orden_data.get("listing_id"),
+            orden_data.get("listingId"),
+            orden_data.get("product_id")
+        ]
+
         for lid in posibles_listing_id:
             listing = buscar_listing_por_id(lid)
-            if listing: return listing
-        posibles_art_order = [orden_data.get("article_code"), orden_data.get("codigo_articulo"), orden_data.get("art")]
+
+            if listing:
+                return listing
+
+        posibles_art_order = [
+            orden_data.get("article_code"),
+            orden_data.get("codigo_articulo"),
+            orden_data.get("art")
+        ]
+
         for cod in posibles_art_order:
             if cod:
                 try:
                     res = supabase.table("listings").select("*").ilike("article_code", f"%{cod}%").limit(1).execute()
-                    if res.data: return res.data[0]
-                except: pass
+
+                    if res.data:
+                        return res.data[0]
+
+                except:
+                    pass
 
     posibles_codigos = [article_code] if article_code else []
-    if producto.upper().startswith("ART-"): posibles_codigos.append(producto)
+
+    if producto.upper().startswith("ART-"):
+        posibles_codigos.append(producto)
+
     for codigo in posibles_codigos:
         try:
             res = supabase.table("listings").select("*").ilike("article_code", f"%{codigo}%").limit(1).execute()
-            if res.data: return res.data[0]
-        except: pass
+
+            if res.data:
+                return res.data[0]
+
+        except:
+            pass
 
     if producto:
         try:
             res = supabase.table("listings").select("*").ilike("title", f"%{producto}%").limit(1).execute()
-            if res.data: return res.data[0]
-        except: pass
+
+            if res.data:
+                return res.data[0]
+
+        except:
+            pass
+
     return None
 
+
 def buscar_perfil_vendedor(seller_id):
-    if not seller_id: return None
+    if not seller_id:
+        return None
+
     tablas = ["perfiles", "profiles", "usuarios", "users"]
+
     for tabla in tablas:
         try:
             res = supabase.table(tabla).select("*").eq("id", seller_id).limit(1).execute()
-            if res.data: return res.data[0]
-        except: pass
+
+            if res.data:
+                return res.data[0]
+
+        except:
+            pass
+
     return None
+
 
 def sacar_datos_vendedor(listing_data, order_data=None):
     listing_data = listing_data or {}
     order_data = order_data or {}
+
     seller_id = listing_data.get("user_id") or order_data.get("seller_id")
-    vendedor_nombre = valor_limpio(listing_data.get("seller_name"), default="Sin nombre")
-    vendedor_whatsapp = valor_limpio(listing_data.get("seller_whatsapp"), default="Sin teléfono")
+
+    vendedor_nombre = valor_limpio(
+        listing_data.get("seller_name"),
+        default="Sin nombre"
+    )
+
+    vendedor_whatsapp = valor_limpio(
+        listing_data.get("seller_whatsapp"),
+        default="Sin teléfono"
+    )
+
     perfil = buscar_perfil_vendedor(seller_id)
+
     if perfil:
-        vendedor_nombre = valor_limpio(perfil.get("nombre"), perfil.get("full_name"), default=vendedor_nombre)
-        vendedor_whatsapp = valor_limpio(perfil.get("whatsapp"), perfil.get("telefono"), default=vendedor_whatsapp)
-    return {"seller_id": seller_id or "No encontrado", "vendedor_nombre": vendedor_nombre, "vendedor_whatsapp": vendedor_whatsapp}
+        vendedor_nombre = valor_limpio(
+            perfil.get("nombre"),
+            perfil.get("full_name"),
+            default=vendedor_nombre
+        )
+
+        vendedor_whatsapp = valor_limpio(
+            perfil.get("whatsapp"),
+            perfil.get("telefono"),
+            default=vendedor_whatsapp
+        )
+
+    return {
+        "seller_id": seller_id or "No encontrado",
+        "vendedor_nombre": vendedor_nombre,
+        "vendedor_whatsapp": vendedor_whatsapp
+    }
+
 
 def sacar_precio_listing(listing_data, order_data=None, data=None):
     listing_data = listing_data or {}
     order_data = order_data or {}
     data = data or {}
-    precio = valor_limpio(order_data.get("total_usd"), data.get("precio"), listing_data.get("precio"), default="No especificado")
+
+    precio = valor_limpio(
+        order_data.get("total_usd"),
+        data.get("precio"),
+        listing_data.get("precio"),
+        listing_data.get("price_usd"),
+        default="No especificado"
+    )
+
     return formatear_precio(precio)
+
 
 def construir_link_articulo(listing_data, data, codigo_articulo=""):
     listing_data = listing_data or {}
     base = (FRONTEND_URL or "").strip().rstrip("/")
-    codigo = valor_limpio(codigo_articulo, listing_data.get("article_code"), default="")
-    if base and codigo and codigo != "No especificado": return f"{base}/producto/{codigo}"
+
+    codigo = valor_limpio(
+        codigo_articulo,
+        listing_data.get("article_code"),
+        default=""
+    )
+
+    if base and codigo and codigo != "No especificado":
+        return f"{base}/producto/{codigo}"
+
     link_enviado = valor_limpio(data.get("link_articulo"), default="")
-    if link_enviado and "/chat" not in link_enviado: return link_enviado
+
+    if link_enviado and "/chat" not in link_enviado:
+        return link_enviado
+
     return "Link no encontrado"
+
 
 @app.route("/api/notificar-compra", methods=["POST"])
 def notificar_compra():
     data = request.json or {}
+
     session_id = data.get("session_id") or "anon"
     producto_recibido = valor_limpio(data.get("producto"), default="")
     article_code_recibido = valor_limpio(data.get("article_code"), default="")
@@ -444,28 +890,65 @@ def notificar_compra():
     order = valor_limpio(data.get("order"), default="Ninguna")
 
     order_data = buscar_order(order)
-    listing_data = buscar_listing(producto=producto_recibido, article_code=article_code_recibido, order=order)
+    listing_data = buscar_listing(
+        producto=producto_recibido,
+        article_code=article_code_recibido,
+        order=order
+    )
 
     if listing_data:
-        titulo_producto = valor_limpio(listing_data.get("title"), producto_recibido, default="Título no encontrado")
-        codigo_articulo = valor_limpio(listing_data.get("article_code"), article_code_recibido, default="No especificado")
+        titulo_producto = valor_limpio(
+            listing_data.get("title"),
+            producto_recibido,
+            default="Título no encontrado"
+        )
+
+        codigo_articulo = valor_limpio(
+            listing_data.get("article_code"),
+            article_code_recibido,
+            default="No especificado"
+        )
+
     else:
-        titulo_producto = valor_limpio(producto_recibido, default="Título no encontrado")
-        codigo_articulo = valor_limpio(article_code_recibido, default="No especificado")
+        titulo_producto = valor_limpio(
+            producto_recibido,
+            default="Título no encontrado"
+        )
+
+        codigo_articulo = valor_limpio(
+            article_code_recibido,
+            default="No especificado"
+        )
 
     vendedor = sacar_datos_vendedor(listing_data, order_data)
     precio = sacar_precio_listing(listing_data, order_data, data)
     link_articulo = construir_link_articulo(listing_data, data, codigo_articulo)
 
     compra_contexto = {
-        "producto": producto_recibido, "titulo_producto": titulo_producto, "codigo_articulo": codigo_articulo,
-        "precio": precio, "order": order, "nombre": nombre, "whatsapp": whatsapp, "email": email,
-        "link_articulo": link_articulo, "seller_id": vendedor["seller_id"], "vendedor_nombre": vendedor["vendedor_nombre"],
+        "producto": producto_recibido,
+        "titulo_producto": titulo_producto,
+        "codigo_articulo": codigo_articulo,
+        "precio": precio,
+        "order": order,
+        "nombre": nombre,
+        "whatsapp": whatsapp,
+        "email": email,
+        "link_articulo": link_articulo,
+        "seller_id": vendedor["seller_id"],
+        "vendedor_nombre": vendedor["vendedor_nombre"],
         "vendedor_whatsapp": vendedor["vendedor_whatsapp"]
     }
 
-    if session_id not in conversaciones: conversaciones[session_id] = {"mensajes": [], "ultimo_mensaje": datetime.now(timezone.utc).isoformat(), "user_id": None, "compra": compra_contexto}
-    else: conversaciones[session_id]["compra"] = compra_contexto
+    if session_id not in conversaciones:
+        conversaciones[session_id] = {
+            "mensajes": [],
+            "ultimo_mensaje": datetime.now(timezone.utc).isoformat(),
+            "user_id": None,
+            "compra": compra_contexto
+        }
+
+    else:
+        conversaciones[session_id]["compra"] = compra_contexto
 
     mensaje = f"""🚨 <b>NUEVA INTENCIÓN DE COMPRA</b> 🚨
 📦 <b>Producto:</b> {titulo_producto}
@@ -484,12 +967,25 @@ def notificar_compra():
 📱 WhatsApp: {vendedor["vendedor_whatsapp"]}
 🆔 ID Vendedor: {vendedor["seller_id"]}
 """
+
     enviado = notificar_telegram(mensaje)
-    return jsonify({"success": True, "telegram_enviado": enviado, "compra": compra_contexto})
+
+    return jsonify({
+        "success": True,
+        "telegram_enviado": enviado,
+        "compra": compra_contexto
+    })
+
 
 @app.route("/", methods=["GET"])
 def home():
-    return jsonify({"status": "ok", "frontend_url": FRONTEND_URL})
+    return jsonify({
+        "status": "ok",
+        "frontend_url": FRONTEND_URL,
+        "moderacion": "blindada",
+        "regla": "si OCR o IA falla, queda pending y no se activa"
+    })
+
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)
