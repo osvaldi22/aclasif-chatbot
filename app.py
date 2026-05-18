@@ -24,9 +24,7 @@ SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 
 # ---------- TELEGRAM ----------
-# IMPORTANTE:
-# Para no exponer tokens en el código, lo mejor es tenerlos en Render / .env.
-# Si ya los tenías funcionando en este archivo anterior, podés volver a poner tus mismos valores aquí.
+# Se recomienda tener estos datos en Render / variables de entorno.
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_ADMIN_BOT_TOKEN = os.environ.get("TELEGRAM_ADMIN_BOT_TOKEN", "")
 TELEGRAM_ADMIN_CHAT_ID = os.environ.get("TELEGRAM_ADMIN_CHAT_ID", "")
@@ -40,7 +38,7 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 # ---------------------------
 SYSTEM_PROMPT = """
 Sos el asistente oficial de Aclasif 🇵🇾.
-REGLAS DE ORO ABSOLUTAS: 
+REGLAS DE ORO ABSOLUTAS:
 - Aclasif es el ÚNICO INTERMEDIARIO en las ventas. Garantizamos compras 100% seguras.
 - NUNCA le digas al cliente que contacte o hable directamente con el vendedor original.
 - NUNCA digas que no manejamos pagos. Nosotros gestionamos el cobro por seguridad.
@@ -269,35 +267,125 @@ def obtener_historial(session_id):
 
 
 # ---------------------------
-# MODERACIÓN INTELIGENTE V3
+# MODERACIÓN INTELIGENTE V4
 # ---------------------------
 
 DOMINIOS_PERMITIDOS = [
     "aclasif.com",
     "www.aclasif.com",
-    "aclasif-web.vercel.app",
-    "amazonpy.com",
-    "www.amazonpy.com"
+    "aclasif-web.vercel.app"
 ]
+
+
+def quitar_dominios_permitidos(texto):
+    t = str(texto or "").lower()
+
+    for dominio in DOMINIOS_PERMITIDOS:
+        t = t.replace(dominio, "")
+
+    return t
+
+
+def detectar_numero_camuflado(texto):
+    """
+    Detecta teléfonos escondidos:
+    +595 994 808030
+    595994808030
+    0994808030
+    0.9.9.4.8.0.8.0.3.0
+    0-9-9-4-8-0-8-0-3-0
+    0f9l9f4 8f0d8sa0r3d0
+    cero nueve nueve cuatro ocho cero ocho cero tres cero
+    """
+    original = str(texto or "").lower()
+
+    if not original.strip():
+        return False, ""
+
+    # Detectar números escritos con palabras.
+    palabras_numero = {
+        "cero": "0",
+        "uno": "1",
+        "una": "1",
+        "dos": "2",
+        "tres": "3",
+        "cuatro": "4",
+        "cinco": "5",
+        "seis": "6",
+        "siete": "7",
+        "ocho": "8",
+        "nueve": "9"
+    }
+
+    palabras_detectadas = []
+
+    for palabra, digito in palabras_numero.items():
+        for match in re.finditer(rf"\b{palabra}\b", original):
+            palabras_detectadas.append((match.start(), digito))
+
+    palabras_detectadas.sort(key=lambda x: x[0])
+
+    if len(palabras_detectadas) >= 7:
+        numero_palabras = "".join([x[1] for x in palabras_detectadas])
+
+        if numero_palabras.startswith("09") or numero_palabras.startswith("9") or numero_palabras.startswith("595"):
+            return True, "Contiene número telefónico escrito en palabras"
+
+        return True, "Contiene muchos números escritos en palabras, posible teléfono"
+
+    # Sacar solo dígitos aunque haya letras, puntos, guiones o espacios en medio.
+    solo_digitos = re.sub(r"\D", "", original)
+
+    if not solo_digitos:
+        return False, ""
+
+    # Paraguay claro.
+    if solo_digitos.startswith("595") and len(solo_digitos) >= 11:
+        return True, "Contiene número telefónico paraguayo +595"
+
+    if solo_digitos.startswith("09") and len(solo_digitos) >= 9:
+        return True, "Contiene número telefónico paraguayo 09"
+
+    # WhatsApp/celular sin cero inicial, ejemplo 994808030.
+    if solo_digitos.startswith("9") and len(solo_digitos) >= 9:
+        return True, "Contiene número de celular probable"
+
+    # Número muy largo metido entre letras o símbolos.
+    # Evita bloquear medidas como 18,5 o 220v porque son cortas.
+    if len(solo_digitos) >= 10:
+        return True, "Contiene número largo sospechoso tipo teléfono"
+
+    # Patrón de muchos dígitos separados por letras o símbolos.
+    # Ejemplo: 0f9l8f5 7f8d6sa4r4d33
+    cantidad_digitos = len(re.findall(r"\d", original))
+    cantidad_letras = len(re.findall(r"[a-zA-Z]", original))
+
+    if cantidad_digitos >= 8 and cantidad_letras >= 2:
+        if solo_digitos.startswith("0") or solo_digitos.startswith("9") or solo_digitos.startswith("595"):
+            return True, "Contiene número camuflado entre letras"
+
+    # Patrón separado por puntos, guiones, espacios, barras, etc.
+    patron_separado = r"(?:\d[\s\-\.\_/|:;,+()]+){7,}\d"
+
+    if re.search(patron_separado, original):
+        return True, "Contiene número camuflado con separadores"
+
+    return False, ""
 
 
 def detectar_contacto_regex(texto):
     """
-    Filtro inteligente:
     Bloquea contactos reales.
-    Permite marcas, modelos, medidas, promociones y texto normal de productos.
+    Permite marcas, modelos, medidas, promociones y texto normal.
     """
     if not texto:
         return False, ""
 
     original = str(texto)
     t = original.lower()
+    t_sin_permitidos = quitar_dominios_permitidos(t)
 
-    texto_sin_links_permitidos = t
-
-    for dominio in DOMINIOS_PERMITIDOS:
-        texto_sin_links_permitidos = texto_sin_links_permitidos.replace(dominio, "")
-
+    # Contacto por palabra.
     palabras_contacto = [
         "whatsapp",
         "wpp",
@@ -310,6 +398,13 @@ def detectar_contacto_regex(texto):
         "tel ",
         "celular",
         "cel:",
+        "nro celular",
+        "nro whatsapp",
+        "numero whatsapp",
+        "número whatsapp",
+        "mi numero",
+        "mi número",
+        "mi whatsapp",
         "llamame",
         "llámame",
         "llamar",
@@ -323,12 +418,6 @@ def detectar_contacto_regex(texto):
         "escribime",
         "escríbeme",
         "mensajeame",
-        "mi numero",
-        "mi número",
-        "mi whatsapp",
-        "nro whatsapp",
-        "numero whatsapp",
-        "número whatsapp",
         "inbox",
         "dm",
         "directo",
@@ -339,13 +428,20 @@ def detectar_contacto_regex(texto):
         if palabra in t:
             return True, f"Contiene invitación de contacto externo: {palabra}"
 
+    # Email directo.
     if re.search(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}", original):
         return True, "Contiene email"
 
+    # Usuario @roberto, @tienda, etc.
+    if re.search(r"(?<!\w)@[a-zA-Z0-9._]{3,}", original):
+        return True, "Contiene usuario externo con @"
+
+    # Redes sociales / correos conocidos.
     redes = [
         "instagram",
         "insta",
         "facebook",
+        "fb.com",
         "telegram",
         "t.me",
         "messenger",
@@ -363,53 +459,24 @@ def detectar_contacto_regex(texto):
 
     for red in redes:
         if red in t:
-            return True, f"Contiene red social o contacto externo: {red}"
+            return True, f"Contiene red social o correo externo: {red}"
 
+    # Links externos.
     posibles_links = re.findall(
-        r"(https?://[^\s]+|www\.[^\s]+|[a-zA-Z0-9.-]+\.(com|net|org|py|app|shop|store|online)[^\s]*)",
-        texto_sin_links_permitidos
+        r"(https?://[^\s]+|www\.[^\s]+|[a-zA-Z0-9.-]+\.(com|net|org|py|app|shop|store|online|info)[^\s]*)",
+        t_sin_permitidos
     )
 
     if posibles_links:
         return True, "Contiene link externo no permitido"
 
-    compactado = re.sub(r"[\s\-\.\(\)\+_/,:;|]+", "", original)
+    # Teléfonos y números escondidos.
+    hay_numero, motivo_numero = detectar_numero_camuflado(original)
 
-    if re.search(r"(09\d{7,9}|595\d{8,10})", compactado):
-        return True, "Contiene número telefónico paraguayo"
+    if hay_numero:
+        return True, motivo_numero
 
-    if re.search(r"\d{8,}", compactado):
-        return True, "Contiene número largo tipo teléfono"
-
-    patron_camuflado = r"(?:\d[\s\-\.\_/|:;]+){7,}\d"
-
-    if re.search(patron_camuflado, original):
-        return True, "Contiene número camuflado con separadores"
-
-    palabras_numero = [
-        "cero",
-        "uno",
-        "dos",
-        "tres",
-        "cuatro",
-        "cinco",
-        "seis",
-        "siete",
-        "ocho",
-        "nueve"
-    ]
-
-    apariciones = []
-
-    for palabra in palabras_numero:
-        for match in re.finditer(rf"\b{palabra}\b", t):
-            apariciones.append(match.start())
-
-    apariciones.sort()
-
-    if len(apariciones) >= 7:
-        return True, "Contiene número escrito en palabras"
-
+    # Dirección exacta con número.
     palabras_direccion = [
         "direccion",
         "dirección",
@@ -434,7 +501,7 @@ def preparar_imagen_para_ocr(img):
     if img.mode != "RGB":
         img = img.convert("RGB")
 
-    max_size = 1800
+    max_size = 2000
 
     if max(img.size) < max_size:
         scale = max_size / max(img.size)
@@ -442,10 +509,10 @@ def preparar_imagen_para_ocr(img):
         img = img.resize(new_size)
 
     enhancer = ImageEnhance.Contrast(img)
-    img = enhancer.enhance(1.5)
+    img = enhancer.enhance(1.8)
 
     enhancer = ImageEnhance.Sharpness(img)
-    img = enhancer.enhance(1.4)
+    img = enhancer.enhance(1.8)
 
     img = img.filter(ImageFilter.SHARPEN)
 
@@ -457,7 +524,7 @@ def ocr_space_desde_pil(img, etiqueta="full"):
         img = preparar_imagen_para_ocr(img)
 
         buffer = BytesIO()
-        img.save(buffer, format="JPEG", quality=92)
+        img.save(buffer, format="JPEG", quality=94)
 
         imagen_b64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
         base64_str = f"data:image/jpeg;base64,{imagen_b64}"
@@ -473,7 +540,7 @@ def ocr_space_desde_pil(img, etiqueta="full"):
             "OCREngine": 2
         }
 
-        resp = requests.post(api_url, data=payload, timeout=35)
+        resp = requests.post(api_url, data=payload, timeout=40)
         resp.raise_for_status()
 
         resultado = resp.json()
@@ -502,8 +569,8 @@ def ocr_space_desde_pil(img, etiqueta="full"):
 
 def extraer_texto_de_imagen(image_url: str) -> str:
     try:
-        print("📸 Descargando imagen para OCR V3...")
-        img_resp = requests.get(image_url, timeout=20)
+        print("📸 Descargando imagen para OCR V4...")
+        img_resp = requests.get(image_url, timeout=25)
         img_resp.raise_for_status()
 
         img_original = Image.open(BytesIO(img_resp.content))
@@ -516,37 +583,38 @@ def extraer_texto_de_imagen(image_url: str) -> str:
         zonas = []
         zonas.append(("completa", img_original))
 
-        if h > 300 and w > 200:
-            zonas.append(("superior", img_original.crop((0, 0, w, int(h * 0.38)))))
-            zonas.append(("centro", img_original.crop((0, int(h * 0.25), w, int(h * 0.75)))))
-            zonas.append(("inferior", img_original.crop((0, int(h * 0.55), w, h))))
+        if h > 250 and w > 150:
+            zonas.append(("superior", img_original.crop((0, 0, w, int(h * 0.40)))))
+            zonas.append(("centro", img_original.crop((0, int(h * 0.22), w, int(h * 0.78)))))
+            zonas.append(("inferior", img_original.crop((0, int(h * 0.50), w, h))))
+            zonas.append(("inferior_baja", img_original.crop((0, int(h * 0.65), w, h))))
 
         textos = []
 
         for etiqueta, zona in zonas:
             texto = ocr_space_desde_pil(zona, etiqueta)
+
             if texto:
                 textos.append(texto)
 
         texto_final = " ".join(textos).strip()
         texto_final = re.sub(r"\s+", " ", texto_final)
 
-        print(f"👀 TEXTO OCR FINAL V3: {texto_final}")
+        print(f"👀 TEXTO OCR FINAL V4: {texto_final}")
 
         return texto_final
 
     except Exception as e:
-        print(f"❌ Error crítico en OCR V3: {e}")
+        print(f"❌ Error crítico en OCR V4: {e}")
         return ""
 
 
 def analizar_imagen_con_deepseek(image_url):
     """
-    V3 menos estricta:
-    - Si no hay imagen: aprobar imagen.
-    - Si OCR no lee texto: aprobar imagen.
-    - Suspender solo si detecta contacto real.
-    - Marcas, modelos, medidas y textos normales se permiten.
+    V4:
+    - Si OCR detecta contacto: suspende.
+    - Si OCR no lee nada: pending, no aprueba automático.
+    - Si OCR lee texto normal sin contacto: IA revisa y puede aprobar.
     """
     if not image_url:
         return "APROBAR", "Sin imagen, se revisa solo texto"
@@ -554,7 +622,7 @@ def analizar_imagen_con_deepseek(image_url):
     texto_extraido = extraer_texto_de_imagen(image_url)
 
     if not texto_extraido:
-        return "APROBAR", "OCR no leyó texto útil, pero no hay contacto detectado"
+        return "PENDIENTE", "OCR no pudo leer texto de la imagen. Revisión manual necesaria."
 
     contacto, motivo_regex = detectar_contacto_regex(texto_extraido)
 
@@ -569,17 +637,18 @@ Solo suspender si hay DATOS DE CONTACTO o intento de sacar la comunicación fuer
 TEXTO EXTRAÍDO:
 {texto_extraido}
 
-SUSPENDER SOLO SI HAY:
+SUSPENDER SI HAY:
 1. Teléfono, WhatsApp o número para contacto.
-2. Número camuflado con puntos, guiones, espacios o símbolos.
+2. Número camuflado con puntos, guiones, espacios, letras o símbolos.
 3. Email.
-4. Redes sociales: Instagram, Facebook, Telegram, TikTok, usuario @.
-5. Link externo que no sea de Aclasif.
-6. Dirección exacta con número para retirar o comprar fuera de la plataforma.
-7. Frases de contacto directo: escribime, contactame, llamame, inbox, DM, mi número, mi WhatsApp.
+4. Usuario con @, por ejemplo @roberto.
+5. Redes sociales: Instagram, Facebook, Telegram, TikTok.
+6. Link externo que no sea de Aclasif.
+7. Dirección exacta con número.
+8. Frases de contacto directo: escribime, contactame, llamame, inbox, DM, mi número, mi WhatsApp.
 
 PERMITIR:
-- Marcas: Curren, Casio, Samsung, Nike, etc.
+- Marcas: Curren, Casio, Samsung, Nike, AmazonPY, etc.
 - Modelos.
 - Medidas: 18,5 pulgadas, 8 mm, 220v, talle 42.
 - Promociones: comprá 2 y llevá 3.
@@ -602,7 +671,7 @@ SUSPENDER: motivo
         "messages": [
             {
                 "role": "system",
-                "content": "Eres un moderador inteligente. Solo suspendes contactos reales. No suspendas marcas, modelos, medidas ni texto normal de producto."
+                "content": "Eres un moderador estricto contra contactos. Suspendes contactos reales u ocultos. No suspendas marcas, modelos, medidas, precios ni texto normal de producto."
             },
             {
                 "role": "user",
@@ -624,7 +693,7 @@ SUSPENDER: motivo
         resp.raise_for_status()
         respuesta = resp.json()["choices"][0]["message"]["content"].strip()
 
-        print(f"🤖 Decisión IA Imagen V3: {respuesta}")
+        print(f"🤖 Decisión IA Imagen V4: {respuesta}")
 
         if respuesta.upper().startswith("SUSPENDER"):
             motivo = respuesta.split(":", 1)[1].strip() if ":" in respuesta else "Contacto en imagen"
@@ -633,8 +702,8 @@ SUSPENDER: motivo
         return "APROBAR", "Imagen sin contacto detectado"
 
     except Exception as e:
-        print("❌ Error IA imagen V3:", e)
-        return "APROBAR", f"IA imagen falló, pero regex no detectó contacto: {str(e)}"
+        print("❌ Error IA imagen V4:", e)
+        return "PENDIENTE", f"Error IA imagen. Revisión manual necesaria: {str(e)}"
 
 
 def analizar_listing_con_deepseek(title, description, image_url=None):
@@ -650,6 +719,9 @@ def analizar_listing_con_deepseek(title, description, image_url=None):
     if decision_imagen == "SUSPENDER":
         return "suspended", f"Imagen: {motivo_imagen}"
 
+    if decision_imagen == "PENDIENTE":
+        return "pending", motivo_imagen
+
     prompt = f"""Eres un moderador automático de Aclasif.
 
 Revisá el título y descripción.
@@ -660,14 +732,15 @@ TÍTULO:
 DESCRIPCIÓN:
 {description}
 
-SUSPENDER SOLO SI HAY:
+SUSPENDER SI HAY:
 1. Teléfono o WhatsApp.
 2. Número camuflado.
 3. Email.
-4. Redes sociales o usuario externo.
-5. Link externo.
-6. Dirección exacta con número para vender fuera de Aclasif.
-7. Frases para contactar fuera de la plataforma.
+4. Usuario con @.
+5. Redes sociales o usuario externo.
+6. Link externo.
+7. Dirección exacta con número para vender fuera de Aclasif.
+8. Frases para contactar fuera de la plataforma.
 
 PERMITIR:
 - Marcas.
@@ -692,7 +765,7 @@ SUSPENDER: motivo
         "messages": [
             {
                 "role": "system",
-                "content": "Solo suspendes datos de contacto reales. No suspendas texto normal de producto, marcas, modelos ni medidas."
+                "content": "Solo suspendes datos de contacto reales u ocultos. No suspendas texto normal de producto, marcas, modelos, medidas ni precios."
             },
             {
                 "role": "user",
@@ -714,7 +787,7 @@ SUSPENDER: motivo
         resp.raise_for_status()
         respuesta = resp.json()["choices"][0]["message"]["content"].strip()
 
-        print(f"🤖 Decisión IA Texto V3: {respuesta}")
+        print(f"🤖 Decisión IA Texto V4: {respuesta}")
 
         if respuesta.upper().startswith("SUSPENDER"):
             motivo = respuesta.split(":", 1)[1].strip() if ":" in respuesta else "Contacto en texto"
@@ -723,8 +796,8 @@ SUSPENDER: motivo
         return "verified", "Aprobado automáticamente. No se detectaron datos de contacto."
 
     except Exception as e:
-        print("❌ Error IA texto V3:", e)
-        return "verified", f"Aprobado por regex. IA texto falló sin contacto detectado: {str(e)}"
+        print("❌ Error IA texto V4:", e)
+        return "pending", f"Error IA texto. Revisión manual necesaria: {str(e)}"
 
 
 @app.route("/api/moderar-listing", methods=["POST"])
@@ -769,6 +842,14 @@ def moderar_listing():
                 f"Motivo: {nota}"
             )
 
+        if decision == "pending":
+            notificar_telegram(
+                f"⚠️ <b>PUBLICACIÓN PENDIENTE DE REVISIÓN</b>\n"
+                f"Producto: {listing.get('title', '')}\n"
+                f"ID: {listing_id}\n"
+                f"Motivo: {nota}"
+            )
+
         return jsonify({
             "success": True,
             "listing_id": listing_id,
@@ -777,7 +858,7 @@ def moderar_listing():
         })
 
     except Exception as e:
-        print("❌ Error moderar_listing V3:", e)
+        print("❌ Error moderar_listing V4:", e)
 
         try:
             supabase.table("listings").update({
@@ -1147,8 +1228,8 @@ def home():
     return jsonify({
         "status": "ok",
         "frontend_url": FRONTEND_URL,
-        "moderacion": "inteligente-v3-contactos-reales",
-        "regla": "bloquea contactos reales; permite marcas, modelos, medidas, promociones y texto normal"
+        "moderacion": "inteligente-v4-contactos-fuerte",
+        "regla": "bloquea telefonos, emails, redes, arrobas, links externos y numeros camuflados; permite marcas, modelos, medidas y texto normal"
     })
 
 
