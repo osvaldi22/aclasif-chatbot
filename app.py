@@ -4,7 +4,7 @@ import re
 import requests
 import base64
 from io import BytesIO
-from PIL import Image
+from PIL import Image, ImageEnhance, ImageFilter
 from datetime import datetime, timezone
 from flask import Flask, request, jsonify
 from flask_cors import CORS
@@ -260,14 +260,14 @@ def obtener_historial(session_id):
 
 
 # ---------------------------
-# MODERACIÓN BLINDADA
+# MODERACIÓN BLINDADA V2
 # ---------------------------
 
 def detectar_contacto_regex(texto):
     """
-    Primer filtro duro.
-    Esto no depende de IA.
-    Si encuentra contacto evidente o camuflado, suspende directo.
+    Filtro duro.
+    Si encuentra contacto evidente, contacto camuflado, flyer de captación,
+    o invitación a contactar fuera de Aclasif, suspende directo.
     """
     if not texto:
         return False, ""
@@ -276,22 +276,28 @@ def detectar_contacto_regex(texto):
     t = texto.lower()
 
     palabras_bloqueadas = [
-        "whatsapp", "wpp", "wasap", "wa.me", "teléfono", "telefono", "tel ",
-        "celular", "llamame", "llámame", "contactame", "contáctame",
+        "whatsapp", "wpp", "wasap", "whats", "wa.me", "teléfono", "telefono",
+        "tel ", "celular", "cel ", "nro", "numero", "número", "llamame",
+        "llámame", "contactame", "contáctame", "contactanos", "contáctanos",
+        "consultanos", "consúltanos", "consulta al", "consultas al",
         "escribime", "escríbeme", "mensajeame", "mi numero", "mi número",
-        "gmail", "hotmail", "outlook", "yahoo", ".com", "@gmail", "@hotmail",
-        "instagram", "insta", "facebook", "telegram", "t.me", "fb", "ig",
-        "seguime", "inbox", "dm", "directo", "direct"
+        "mi whatsapp", "gmail", "hotmail", "outlook", "yahoo", "@gmail",
+        "@hotmail", "instagram", "insta", "facebook", "telegram", "t.me",
+        "fb", "ig", "seguime", "inbox", "dm", "directo", "direct",
+        "socios", "socio", "dropshipping", "drop shipping", "buscando",
+        "buscamos", "emprendedores", "revendedores", "distribuidores",
+        "distribuidor", "plataforma", "ofrecer productos", "negocio",
+        "ganancias", "asesor", "asesores"
     ]
 
     for palabra in palabras_bloqueadas:
         if palabra in t:
-            return True, f"Contiene palabra o contacto externo: {palabra}"
+            return True, f"Contiene palabra prohibida o contacto externo: {palabra}"
 
     if re.search(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}", original):
         return True, "Contiene email"
 
-    if re.search(r"(https?://|www\.|wa\.me/|t\.me/)", t):
+    if re.search(r"(https?://|www\.|wa\.me/|t\.me/|\.com|\.net|\.org|\.py)", t):
         return True, "Contiene link externo"
 
     compactado = re.sub(r"[\s\-\.\(\)\+_/,:;|]+", "", original)
@@ -315,26 +321,41 @@ def detectar_contacto_regex(texto):
     return False, ""
 
 
-def extraer_texto_de_imagen(image_url: str) -> str:
+def preparar_imagen_para_ocr(img):
+    """
+    Mejora la imagen para OCR: aumenta tamaño, contraste y nitidez.
+    """
+    if img.mode != "RGB":
+        img = img.convert("RGB")
+
+    max_size = 1800
+
+    if max(img.size) < max_size:
+        scale = max_size / max(img.size)
+        new_size = (int(img.size[0] * scale), int(img.size[1] * scale))
+        img = img.resize(new_size)
+
+    enhancer = ImageEnhance.Contrast(img)
+    img = enhancer.enhance(1.8)
+
+    enhancer = ImageEnhance.Sharpness(img)
+    img = enhancer.enhance(1.6)
+
+    img = img.filter(ImageFilter.SHARPEN)
+
+    return img
+
+
+def ocr_space_desde_pil(img, etiqueta="full"):
     try:
-        print("📸 Descargando imagen para OCR...")
-        img_resp = requests.get(image_url, timeout=15)
-        img_resp.raise_for_status()
-
-        img = Image.open(BytesIO(img_resp.content))
-
-        if img.mode != "RGB":
-            img = img.convert("RGB")
-
-        img.thumbnail((1400, 1400))
+        img = preparar_imagen_para_ocr(img)
 
         buffer = BytesIO()
-        img.save(buffer, format="JPEG", quality=90)
+        img.save(buffer, format="JPEG", quality=92)
 
         imagen_b64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
         base64_str = f"data:image/jpeg;base64,{imagen_b64}"
 
-        print("🔍 Analizando imagen con OCR.space...")
         api_url = "https://api.ocr.space/parse/image"
 
         payload = {
@@ -346,14 +367,14 @@ def extraer_texto_de_imagen(image_url: str) -> str:
             "OCREngine": 2
         }
 
-        resp = requests.post(api_url, data=payload, timeout=30)
+        resp = requests.post(api_url, data=payload, timeout=35)
         resp.raise_for_status()
 
         resultado = resp.json()
 
         if resultado.get("IsErroredOnProcessing"):
             msg_error = resultado.get("ErrorMessage", "Error OCR desconocido")
-            print(f"❌ OCR devolvió error interno: {msg_error}")
+            print(f"❌ OCR error en {etiqueta}: {msg_error}")
             return ""
 
         textos = []
@@ -364,22 +385,73 @@ def extraer_texto_de_imagen(image_url: str) -> str:
                 textos.append(parsed)
 
         texto_final = " ".join(textos).strip()
+        print(f"👀 OCR {etiqueta}: {texto_final}")
 
-        print(f"👀 TEXTO EXTRAÍDO DE LA IMAGEN: {texto_final}")
         return texto_final
 
     except Exception as e:
-        print(f"❌ Error crítico en OCR: {e}")
+        print(f"❌ Error OCR {etiqueta}: {e}")
+        return ""
+
+
+def extraer_texto_de_imagen(image_url: str) -> str:
+    """
+    OCR múltiple:
+    - imagen completa
+    - parte superior
+    - centro
+    - parte inferior
+    Esto ayuda a leer flyers donde el teléfono suele estar abajo.
+    """
+    try:
+        print("📸 Descargando imagen para OCR V2...")
+        img_resp = requests.get(image_url, timeout=20)
+        img_resp.raise_for_status()
+
+        img_original = Image.open(BytesIO(img_resp.content))
+
+        if img_original.mode != "RGB":
+            img_original = img_original.convert("RGB")
+
+        w, h = img_original.size
+
+        zonas = []
+
+        zonas.append(("completa", img_original))
+
+        if h > 300 and w > 200:
+            zonas.append(("superior", img_original.crop((0, 0, w, int(h * 0.38)))))
+            zonas.append(("centro", img_original.crop((0, int(h * 0.25), w, int(h * 0.75)))))
+            zonas.append(("inferior", img_original.crop((0, int(h * 0.55), w, h))))
+
+        textos = []
+
+        for etiqueta, zona in zonas:
+            texto = ocr_space_desde_pil(zona, etiqueta)
+
+            if texto:
+                textos.append(texto)
+
+        texto_final = " ".join(textos).strip()
+        texto_final = re.sub(r"\s+", " ", texto_final)
+
+        print(f"👀 TEXTO OCR FINAL: {texto_final}")
+
+        return texto_final
+
+    except Exception as e:
+        print(f"❌ Error crítico en OCR V2: {e}")
         return ""
 
 
 def analizar_imagen_con_deepseek(image_url):
     """
-    Regla nueva:
-    - Si no hay imagen: pendiente, no aprobar automático.
-    - Si OCR falla o no lee texto: pending, no aprobar automático.
-    - Si regex detecta contacto: suspended directo.
-    - Si IA detecta contacto: suspended.
+    Reglas estrictas:
+    - Sin imagen: pending.
+    - OCR sin texto: pending.
+    - Regex detecta contacto/flyer/redes: suspended.
+    - IA detecta contacto: suspended.
+    - Si OCR extrae demasiado texto de flyer pero IA no es clara: pending.
     """
     if not image_url:
         return "PENDIENTE", "Sin imagen para verificar"
@@ -394,8 +466,20 @@ def analizar_imagen_con_deepseek(image_url):
     if contacto:
         return "SUSPENDER", f"Imagen: {motivo_regex}"
 
+    if len(texto_extraido) > 80:
+        palabras_sospechosas = [
+            "buscando", "socios", "dropshipping", "contact", "consulta",
+            "whatsapp", "facebook", "instagram", "telegram", "emprendedor",
+            "plataforma", "ganancia", "asesor"
+        ]
+
+        t = texto_extraido.lower()
+
+        if any(p in t for p in palabras_sospechosas):
+            return "SUSPENDER", "Imagen tipo flyer/publicidad con posible contacto externo"
+
     prompt = f"""Analiza el siguiente texto extraído de la imagen de un producto.
-Tu objetivo es ser EXTREMADAMENTE ESTRICTO y detectar DATOS DE CONTACTO PERSONALES.
+Tu objetivo es ser EXTREMADAMENTE ESTRICTO y detectar DATOS DE CONTACTO PERSONALES o publicidad de captación externa.
 
 TEXTO EXTRAÍDO:
 {texto_extraido}
@@ -406,7 +490,8 @@ DEBES SUSPENDER SI HAY:
 3. Emails.
 4. Links externos.
 5. Instagram, Facebook, Telegram, @usuario, redes sociales.
-6. Frases como contactame, escribime, mi número, mi WhatsApp, inbox, DM.
+6. Frases como contactame, escribime, consultanos, mi número, mi WhatsApp, inbox, DM.
+7. Flyer de socios, dropshipping, revendedores, asesores, plataforma externa o captación de personas.
 
 Responde EXACTAMENTE:
 APROBAR
@@ -462,13 +547,6 @@ SUSPENDER: motivo
 
 
 def analizar_listing_con_deepseek(title, description, image_url=None):
-    """
-    Moderación final:
-    - Regex texto primero.
-    - Imagen después.
-    - IA texto después.
-    - Si algo falla: pending, no verified.
-    """
     texto_total = f"{title}\n{description}"
 
     contacto_texto, motivo_texto_regex = detectar_contacto_regex(texto_total)
@@ -500,6 +578,7 @@ SUSPENDER SI HAY:
 4. Emails.
 5. Frases de contacto directo.
 6. Direcciones exactas para evitar la plataforma.
+7. Captación de socios, dropshipping, revendedores o asesor externo.
 
 Responde EXACTAMENTE:
 APROBAR
@@ -982,8 +1061,8 @@ def home():
     return jsonify({
         "status": "ok",
         "frontend_url": FRONTEND_URL,
-        "moderacion": "blindada",
-        "regla": "si OCR o IA falla, queda pending y no se activa"
+        "moderacion": "blindada-v2-flyer",
+        "regla": "si OCR falla queda pending; si detecta flyer/contacto/socios/dropshipping suspende"
     })
 
 
