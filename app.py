@@ -26,8 +26,21 @@ SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 # ---------- TELEGRAM ----------
 # Se recomienda configurar estos valores en Render / Environment.
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_ADMIN_BOT_TOKEN = os.environ.get("TELEGRAM_ADMIN_BOT_TOKEN", "")
-TELEGRAM_ADMIN_CHAT_ID = os.environ.get("TELEGRAM_ADMIN_CHAT_ID", "")
+
+# Avisos administrativos de compra por Telegram.
+# Si Render no tiene las variables ADMIN, usa como respaldo las variables normales del bot.
+TELEGRAM_ADMIN_BOT_TOKEN = (
+    os.environ.get("TELEGRAM_ADMIN_BOT_TOKEN")
+    or os.environ.get("TELEGRAM_BOT_TOKEN")
+    or ""
+)
+
+TELEGRAM_ADMIN_CHAT_ID = (
+    os.environ.get("TELEGRAM_ADMIN_CHAT_ID")
+    or os.environ.get("TELEGRAM_CHAT_ID")
+    or os.environ.get("CHAT_ID")
+    or ""
+)
 
 FRONTEND_URL = os.environ.get("FRONTEND_URL", "https://aclasif-web.vercel.app")
 
@@ -185,16 +198,36 @@ def consultar_deepseek(mensaje, session_id, extra_context=""):
 
 def notificar_telegram(mensaje):
     try:
-        if not TELEGRAM_ADMIN_BOT_TOKEN or not TELEGRAM_ADMIN_CHAT_ID:
-            print("⚠️ Telegram admin no configurado en variables de entorno.")
+        bot_token = (
+            TELEGRAM_ADMIN_BOT_TOKEN
+            or os.environ.get("TELEGRAM_ADMIN_BOT_TOKEN")
+            or os.environ.get("TELEGRAM_BOT_TOKEN")
+            or ""
+        )
+
+        chat_id = (
+            TELEGRAM_ADMIN_CHAT_ID
+            or os.environ.get("TELEGRAM_ADMIN_CHAT_ID")
+            or os.environ.get("TELEGRAM_CHAT_ID")
+            or os.environ.get("CHAT_ID")
+            or ""
+        )
+
+        if not bot_token or not chat_id:
+            print("⚠️ Telegram admin no configurado.")
+            print("TELEGRAM_ADMIN_BOT_TOKEN existe:", bool(os.environ.get("TELEGRAM_ADMIN_BOT_TOKEN")))
+            print("TELEGRAM_BOT_TOKEN existe:", bool(os.environ.get("TELEGRAM_BOT_TOKEN")))
+            print("TELEGRAM_ADMIN_CHAT_ID existe:", bool(os.environ.get("TELEGRAM_ADMIN_CHAT_ID")))
+            print("TELEGRAM_CHAT_ID existe:", bool(os.environ.get("TELEGRAM_CHAT_ID")))
+            print("CHAT_ID existe:", bool(os.environ.get("CHAT_ID")))
             return False
 
-        url = f"https://api.telegram.org/bot{TELEGRAM_ADMIN_BOT_TOKEN}/sendMessage"
+        url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
 
         resp = requests.post(
             url,
             json={
-                "chat_id": TELEGRAM_ADMIN_CHAT_ID,
+                "chat_id": chat_id,
                 "text": mensaje,
                 "parse_mode": "HTML"
             },
