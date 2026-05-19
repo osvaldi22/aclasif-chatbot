@@ -17,7 +17,7 @@ CORS(app)
 # ---------------------------
 # CONFIGURACIONES GROQ
 # ---------------------------
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY") 
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 
@@ -37,7 +37,7 @@ if SUPABASE_URL and SUPABASE_KEY:
 # ---------------------------
 SYSTEM_PROMPT = """
 Sos el asistente oficial de Aclasif 🇵🇾.
-REGLAS DE ORO ABSOLUTAS: 
+REGLAS DE ORO ABSOLUTAS:
 - Aclasif es el ÚNICO INTERMEDIARIO en las ventas. Garantizamos compras 100% seguras.
 - NUNCA le digas al cliente que contacte o hable directamente con el vendedor original.
 - NUNCA digas que no manejamos pagos. Nosotros gestionamos el cobro por seguridad.
@@ -103,7 +103,7 @@ CONTEXTO INTERNO DE LA COMPRA ACTUAL:
 - Producto: {compra.get("titulo_producto", compra.get("producto", "No especificado"))}
 - Código ART: {compra.get("codigo_articulo", compra.get("article_code", "No especificado"))}
 - Precio: {compra.get("precio", "No especificado")}
-- Link del artículo: {compra.get("link_articulo", "No especificado")}
+- Link del artículo: {compra.get("link_articulo", "No weddings specified")}
 - Nombre comprador: {compra.get("nombre", "No especificado")}
 - WhatsApp comprador: {compra.get("whatsapp", "No especificado")}
 - Email comprador: {compra.get("email", "No especificado")}
@@ -116,14 +116,14 @@ def consultar_groq(mensaje, session_id, extra_context=""):
         conversaciones[session_id] = {"mensajes": [], "ultimo_mensaje": datetime.now(timezone.utc).isoformat(), "user_id": None, "compra": None}
     sesion = conversaciones[session_id]
     sesion["ultimo_mensaje"] = datetime.now(timezone.utc).isoformat()
-    
+
     messages = [{"role": "system", "content": SYSTEM_PROMPT + extra_context}]
     for msg in sesion["mensajes"][-10:]:
         messages.append({"role": msg["role"], "content": msg["content"]})
     messages.append({"role": "user", "content": mensaje})
 
     payload = {
-        "model": "llama-3.1-8b-instant", 
+        "model": "llama-3.1-8b-instant",
         "messages": messages,
         "temperature": 0.3,
         "max_tokens": 500
@@ -187,7 +187,7 @@ def obtener_historial(session_id):
     return jsonify({"messages": sesion["mensajes"]})
 
 # ---------------------------
-# MODERACIÓN DE TEXTO E IMÁGENES CON GROQ VISION OFICIAL 👁️
+# MODERACIÓN DE TEXTO E IMÁGENES CON GROQ VISION (RE-CALIBRADO) 👁
 # ---------------------------
 def obtener_imagen_base64(image_url):
     try:
@@ -195,9 +195,9 @@ def obtener_imagen_base64(image_url):
         resp.raise_for_status()
         img = Image.open(BytesIO(resp.content))
         if img.mode != 'RGB': img = img.convert('RGB')
-        img.thumbnail((800, 800))
+        img.thumbnail((1024, 1024)) # ✅ Aceptamos la mejora de Meta para más resolución
         buffer = BytesIO()
-        img.save(buffer, format="JPEG", quality=80)
+        img.save(buffer, format="JPEG", quality=85)
         return base64.b64encode(buffer.getvalue()).decode('utf-8')
     except Exception as e:
         print("Error al descargar imagen:", str(e))
@@ -205,32 +205,31 @@ def obtener_imagen_base64(image_url):
 
 def analizar_imagen_con_groq(image_url):
     if not image_url: return "APROBAR", ""
-    
+
     imagen_b64 = obtener_imagen_base64(image_url)
     if not imagen_b64: return "PENDIENTE", "No se pudo descargar o procesar el archivo de imagen."
 
     prompt_imagen = """Eres el moderador de seguridad de Aclasif. Actúas con OJO DE ÁGUILA.
-    Analiza esta imagen. Tu único objetivo es detectar DATOS DE CONTACTO PERSONALES para evitar evasión de comisiones.
-    
-    ✅ EXCEPCIONES IMPORTANTES (DEBES APROBAR ESTO):
-    - Marcas de fábrica grabadas en el producto (ej. marcas de relojes, repuestos, ropa, electrónica).
-    - Códigos de artículo, códigos ART, números de serie de fábrica o números de repuestos (ej. "ART-1234", "Ref: 9001").
-    - Medidas, talles o especificaciones técnicas del artículo.
+Analiza esta imagen. Tu único objetivo es detectar DATOS DE CONTACTO PERSONALES para evitar evasión de comisiones.
 
-    🚫 REGLAS ESTRICTAS - RECHAZA SI VES:
-    1. Números de teléfono o WhatsApp escritos (ej. 0981, 0994, +595, o dígitos camuflados separados por puntos o espacios).
-    2. Arrobas (@) con nombres de usuario de redes sociales (Instagram, TikTok, Facebook).
-    3. Correos electrónicos (emails).
-    4. Textos agregados a la foto que inviten a salir de la app: "contactame", "escribime", "mi whatsapp", "link en bio".
-    5. Logos de WhatsApp o Instagram colocados para indicar contacto externo.
-    
-    Tu respuesta debe contener obligatoriamente una de estas dos palabras clave:
-    - Escribe 'SUSPENDER: [motivo]' si viola alguna regla estricta.
-    - Escribe 'APROBAR' si la imagen es segura y no tiene datos de contacto.
-    """
-    
+✅ EXCEPCIONES IMPORTANTES (DEBES APROBAR ESTO):
+- Marcas de fábrica grabadas en el producto (ej. marcas de relojes, repuestos, ropa, electrónica).
+- Códigos de artículo, códigos ART, números de serie de fábrica o números de repuestos (ej. "ART-1234", "Ref: 9001").
+- Medidas, talles o especificaciones técnicas del artículo.
+
+🚫 REGLAS ESTRICTAS - RECHAZA SI VES:
+1. Números de teléfono o WhatsApp escritos (ej. 0981, 0994, +595, o dígitos camuflados separados por puntos o espacios).
+2. Arrobas (@) con nombres de usuario de redes sociales (Instagram, TikTok, Facebook).
+3. Correos electrónicos (emails).
+4. Textos agregados a la foto que inviten a salir de la app: "contactame", "escribime", "mi whatsapp", "link en bio".
+5. Logos de WhatsApp o Instagram colocados para indicar contacto externo.
+
+Responde SOLO con una de estas dos opciones:
+SUSPENDER: [motivo corto]
+APROBAR"""
+
     payload = {
-        "model": "llama-3.2-90b-vision-preview", # Modelo de vision de 90B oficial de Groq
+        "model": "llama-3.2-90b-vision-preview", # ✅ EL PAPÁ DE LOS MODELOS DE VISIÓN REAL EN GROQ
         "messages": [
             {
                 "role": "user",
@@ -245,65 +244,64 @@ def analizar_imagen_con_groq(image_url):
                 ]
             }
         ],
-        "temperature": 0.0, # Modificación a cero para evitar creatividad
+        "temperature": 0.0,
         "max_tokens": 100
     }
-    
+
     url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {GROQ_API_KEY}"
     }
-    
+
     try:
-        resp = requests.post(url, json=payload, headers=headers, timeout=25)
+        resp = requests.post(url, json=payload, headers=headers, timeout=30) # ✅ 30 segundos de aguante como pidió Meta
         if resp.status_code != 200:
-            print(f"Error detallado Groq: {resp.text}")
+            print(f"Error Groq Vision {resp.status_code}: {resp.text}")
             return "PENDIENTE", f"Error API Groq Visión (Status {resp.status_code})"
-            
-        choices = resp.json().get("choices", [])
+
+        data = resp.json()
+        choices = data.get("choices", [])
         if not choices:
             return "PENDIENTE", "Groq no devolvió respuesta - posible NSFW o bloqueo"
-            
+
         respuesta = choices[0]["message"]["content"].strip()
 
         if "SUSPENDER" in respuesta.upper():
             motivo = respuesta.split(":", 1)[1].strip() if ":" in respuesta else "Contacto visual detectado en la imagen."
             return "SUSPENDER", motivo
-            
-        if "APROBAR" in respuesta.upper():
-            return "APROBAR", ""
-            
+
         return "APROBAR", ""
     except Exception as e:
+        print(f"Exception Groq Vision: {str(e)}")
         return "PENDIENTE", f"Error interno en radar de imagen: {str(e)}"
 
 def analizar_listing_con_groq(title, description, image_url=None):
     decision_imagen, motivo_imagen = "APROBAR", ""
-    if image_url: 
+    if image_url:
         decision_imagen, motivo_imagen = analizar_imagen_con_groq(image_url)
 
     if decision_imagen == "PENDIENTE": return "pending", f"Fallo de radar visual: {motivo_imagen}"
     elif decision_imagen == "SUSPENDER": return "suspended", f"Imagen: {motivo_imagen}"
 
     prompt_texto = f"""Eres un moderador automático IMPLACABLE de Aclasif.
-    Detecta DATOS DE CONTACTO PERSONALES en el título/descripción.
+Detecta DATOS DE CONTACTO PERSONALES en el título/descripción.
 
-    TÍTULO: {title}
-    DESCRIPCIÓN: {description}
+TÍTULO: {title}
+DESCRIPCIÓN: {description}
 
-    ✅ PERMITIDO (DEBES APROBAR):
-    - Códigos de artículo (ART), números de serie, marcas de repuestos.
+✅ PERMITIDO (DEBES APROBAR):
+- Códigos de artículo (ART), números de serie, marcas de repuestos.
 
-    🚫 REGLAS ESTRICTAS - SUSPENDER SI HAY:
-    1. Teléfonos/WhatsApp (ej. "0981123456", "+595...").
-    2. Arrobas (@) con usuarios de redes sociales.
-    3. Enlaces web, correos electrónicos.
-    4. Frases de contacto directo: "escribime", "contactame al", "mi whatsapp".
+🚫 REGLAS ESTRICTAS - SUSPENDER SI HAY:
+1. Teléfonos/WhatsApp (ej. "0981123456", "+595...").
+2. Arrobas (@) con usuarios de redes sociales.
+3. Enlaces web, correos electrónicos.
+4. Frases de contacto directo: "escribime", "contactame al", "mi whatsapp".
 
-    Responde EXACTAMENTE:
-    APROBAR o SUSPENDER
-    """
+Responde EXACTAMENTE:
+APROBAR o SUSPENDER
+"""
     payload = {
         "model": "llama-3.1-8b-instant",
         "messages": [{"role": "user", "content": prompt_texto}],
@@ -342,14 +340,14 @@ def moderar_listing():
         update_data = {
             "moderation_status": decision,
             "moderation_note": nota,
-            "is_active": decision == "verified", 
+            "is_active": decision == "verified",
             "last_reviewed_at": datetime.now(timezone.utc).isoformat()
         }
         if decision == "verified": update_data["verified_at"] = datetime.now(timezone.utc).isoformat()
-        
+
         supabase.table("listings").update(update_data).eq("id", listing_id).execute()
 
-        if decision == "pending": 
+        if decision == "pending":
             notificar_telegram(f"⚠️ Publicación en revisión manual\nTítulo: {listing.get('title', '')}\nMotivo: {nota}\nID: {listing_id}")
         return jsonify({"success": True, "listing_id": listing_id, "decision": decision, "nota": nota})
     except Exception as e:
@@ -507,9 +505,9 @@ def notificar_compra():
         "vendedor_whatsapp": vendedor["vendedor_whatsapp"]
     }
 
-    if session_id not in conversaciones: 
+    if session_id not in conversaciones:
         conversaciones[session_id] = {"mensajes": [], "ultimo_mensaje": datetime.now(timezone.utc).isoformat(), "user_id": None, "compra": compra_contexto}
-    else: 
+    else:
         conversaciones[session_id]["compra"] = compra_contexto
 
     mensaje = f"""🚨 <b>NUEVA INTENCIÓN DE COMPRA</b> 🚨
