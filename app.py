@@ -15,11 +15,12 @@ app = Flask(__name__)
 CORS(app)
 
 # ---------------------------
-# CONFIGURACIONES (AHORA 100% SEGURAS DESDE RENDER)
+# CONFIGURACIONES GROQ (CON TU CLAVE INYECTADA)
 # ---------------------------
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY") 
+# El código primero busca en Render, si no está ahí, usa tu clave directa automáticamente.
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 
 # ---------- TELEGRAM ----------
 TELEGRAM_BOT_TOKEN = "8753872074:AAFub-e8qrfNhVvcLX46Kb_jpLUBzlSAJLA"
@@ -111,32 +112,34 @@ CONTEXTO INTERNO DE LA COMPRA ACTUAL:
 - WhatsApp vendedor: {compra.get("vendedor_whatsapp", "No especificado")}
 """
 
-def consultar_gemini(mensaje, session_id, extra_context=""):
+def consultar_groq(mensaje, session_id, extra_context=""):
     if session_id not in conversaciones:
         conversaciones[session_id] = {"mensajes": [], "ultimo_mensaje": datetime.now(timezone.utc).isoformat(), "user_id": None, "compra": None}
     sesion = conversaciones[session_id]
     sesion["ultimo_mensaje"] = datetime.now(timezone.utc).isoformat()
     
-    contents = []
+    messages = [{"role": "system", "content": SYSTEM_PROMPT + extra_context}]
     for msg in sesion["mensajes"][-10:]:
-        role = "user" if msg["role"] == "user" else "model"
-        contents.append({"role": role, "parts": [{"text": msg["content"]}]})
-    
-    contents.append({"role": "user", "parts": [{"text": mensaje}]})
+        messages.append({"role": msg["role"], "content": msg["content"]})
+    messages.append({"role": "user", "content": mensaje})
 
     payload = {
-        "systemInstruction": {"parts": [{"text": SYSTEM_PROMPT + extra_context}]},
-        "contents": contents,
-        "generationConfig": {"temperature": 0.3, "maxOutputTokens": 500}
+        "model": "llama-3.1-8b-instant", 
+        "messages": messages,
+        "temperature": 0.3,
+        "max_tokens": 500
     }
-
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
+    url = "https://api.groq.com/openai/v1/chat/completions"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {GROQ_API_KEY}"
+    }
     try:
-        resp = requests.post(url, json=payload, headers={"Content-Type": "application/json"}, timeout=30)
+        resp = requests.post(url, json=payload, headers=headers, timeout=30)
         resp.raise_for_status()
-        respuesta = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
+        respuesta = resp.json()["choices"][0]["message"]["content"]
     except Exception as e:
-        print("Error Gemini Chat:", str(e))
+        print("Error Groq Chat:", str(e))
         respuesta = "Lo siento, tuve un pequeño problema de conexión. ¿Me repetís kape?"
 
     sesion["mensajes"].append({"role": "user", "content": mensaje})
@@ -168,7 +171,7 @@ def chat_web():
     if user_id: sesion["user_id"] = user_id
 
     try:
-        respuesta = consultar_gemini(mensaje, session_id, crear_contexto_compra_texto(sesion.get("compra")))
+        respuesta = consultar_groq(mensaje, session_id, crear_contexto_compra_texto(sesion.get("compra")))
     except:
         respuesta = "Lo siento, tuve un problema de conexión. ¿Me repetís kape?"
 
@@ -185,7 +188,7 @@ def obtener_historial(session_id):
     return jsonify({"messages": sesion["mensajes"]})
 
 # ---------------------------
-# MODERACIÓN VISUAL PURA (Ojos de IA)
+# MODERACIÓN DE TEXTO E IMÁGENES CON GROQ VISION 👁️
 # ---------------------------
 def obtener_imagen_base64(image_url):
     try:
@@ -201,77 +204,74 @@ def obtener_imagen_base64(image_url):
         print("Error al descargar imagen:", str(e))
         return None
 
-def analizar_imagen_con_gemini(image_url):
+def analizar_imagen_con_groq(image_url):
     if not image_url: return "APROBAR", ""
     
     imagen_b64 = obtener_imagen_base64(image_url)
     if not imagen_b64: return "PENDIENTE", "No se pudo descargar o procesar el archivo de imagen."
 
-    prompt_imagen = """Eres el moderador oficial de seguridad de Aclasif. Actúas con OJO DE ÁGUILA humano.
-    Analizá esta imagen detalladamente. Tu único objetivo es detectar INTENTOS DE EVASIÓN (datos de contacto personales).
+    prompt_imagen = """Eres el moderador de seguridad de Aclasif. Actúas con OJO DE ÁGUILA.
+    Analiza esta imagen. Tu único objetivo es detectar DATOS DE CONTACTO PERSONALES para evitar evasión de comisiones.
     
-    ✅ EXCEPCIONES IMPORTANTES (DEBÉS APROBAR ESTO):
-    - Marcas comerciales legítimas impresas en el producto (ej. marcas de relojes como Curren, repuestos, ropa, electrónica).
-    - Códigos de artículo, códigos ART, números de serie de fábrica o números de repuestos (ej. "ART-1234", "Ref: 9001", números de pieza).
-    - Medidas, talles, precios o especificaciones técnicas del artículo.
+    ✅ EXCEPCIONES IMPORTANTES (DEBES APROBAR ESTO):
+    - Marcas de fábrica grabadas en el producto (ej. marcas de relojes, repuestos, ropa, electrónica).
+    - Códigos de artículo, códigos ART, números de serie de fábrica o números de repuestos (ej. "ART-1234", "Ref: 9001").
+    - Medidas, talles o especificaciones técnicas del artículo.
 
-    🚫 REGLAS ESTRICTAS - RESPONDÉ 'SUSPENDER' INMEDIATAMENTE SI VES:
-    1. Números de teléfono o WhatsApp escritos (ej. 0981, 0994, +595, o números camuflados separados por puntos/espacios).
-    2. Arrobas (@) seguidas de nombres de usuario que apunten a redes sociales (Instagram, TikTok, Facebook).
+    🚫 REGLAS ESTRICTAS - RESPONDE 'SUSPENDER' SI VES:
+    1. Números de teléfono o WhatsApp escritos (ej. 0981, 0994, +595, o dígitos camuflados separados por puntos o espacios).
+    2. Arrobas (@) con nombres de usuario de redes sociales (Instagram, TikTok, Facebook).
     3. Correos electrónicos (emails).
-    4. Textos que inviten a salir de la plataforma: "contactame", "escribime", "mi whatsapp", "link en bio".
-    5. Logos o iconos de WhatsApp, Instagram, Facebook o Telegram colocados para contacto externo.
+    4. Textos agregados a la foto que inviten a salir de la app: "contactame", "escribime", "mi whatsapp", "link en bio".
+    5. Logos de WhatsApp o Instagram colocados para indicar contacto externo.
     
-    Respondé EXACTAMENTE en este formato, sin usar negritas ni asteriscos:
+    Responde EXACTAMENTE en este formato plano, sin asteriscos ni negritas:
     APROBAR
     o
-    SUSPENDER: [motivo detallado en texto plano]
+    SUSPENDER: [motivo corto de lo que viste]
     """
     
     payload = {
-        "contents": [
+        "model": "llama-3.2-11b-vision-preview", 
+        "messages": [
             {
-                "parts": [
-                    {"text": prompt_imagen},
-                    {"inlineData": {"mimeType": "image/jpeg", "data": imagen_b64}}
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt_imagen},
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{imagen_b64}"}}
                 ]
             }
         ],
-        "generationConfig": {"temperature": 0.1, "maxOutputTokens": 100}
+        "temperature": 0.1,
+        "max_tokens": 100
     }
     
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
+    url = "https://api.groq.com/openai/v1/chat/completions"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {GROQ_API_KEY}"
+    }
     
     try:
-        resp = requests.post(url, json=payload, headers={"Content-Type": "application/json"}, timeout=25)
-        
+        resp = requests.post(url, json=payload, headers=headers, timeout=25)
         if resp.status_code != 200:
-            return "PENDIENTE", f"Error API Google (Status {resp.status_code}): {resp.text[:120]}"
+            return "PENDIENTE", f"Error API Groq Visión (Status {resp.status_code})"
             
-        res_json = resp.json()
-        if "candidates" not in res_json or not res_json["candidates"]:
-            return "PENDIENTE", "Google bloqueó la respuesta por políticas o vino vacía."
-            
-        candidate = res_json["candidates"][0]
-        if "content" not in candidate or "parts" not in candidate["content"]:
-            return "PENDIENTE", f"Respuesta sin contenido estructurado. Razón: {candidate.get('finishReason', 'Desconocida')}"
-            
-        respuesta = candidate["content"]["parts"][0]["text"].strip()
+        respuesta = resp.json()["choices"][0]["message"]["content"].strip()
 
         if "SUSPENDER" in respuesta.upper():
             motivo = respuesta.split(":", 1)[1].strip() if ":" in respuesta else "Contacto visual detectado en la imagen."
             return "SUSPENDER", motivo
-            
         return "APROBAR", ""
     except Exception as e:
-        return "PENDIENTE", f"Error interno en la petición: {str(e)}"
+        return "PENDIENTE", f"Error interno en radar de imagen: {str(e)}"
 
-def analizar_listing_con_gemini(title, description, image_url=None):
+def analizar_listing_con_groq(title, description, image_url=None):
     decision_imagen, motivo_imagen = "APROBAR", ""
     if image_url: 
-        decision_imagen, motivo_imagen = analizar_imagen_con_gemini(image_url)
+        decision_imagen, motivo_imagen = analizar_imagen_con_groq(image_url)
 
-    if decision_imagen == "PENDIENTE": return "pending", f"Fallo de radar: {motivo_imagen}"
+    if decision_imagen == "PENDIENTE": return "pending", f"Fallo de radar visual: {motivo_imagen}"
     elif decision_imagen == "SUSPENDER": return "suspended", f"Imagen: {motivo_imagen}"
 
     prompt_texto = f"""Eres un moderador automático IMPLACABLE de Aclasif.
@@ -282,37 +282,33 @@ def analizar_listing_con_gemini(title, description, image_url=None):
 
     ✅ PERMITIDO (DEBES APROBAR):
     - Códigos de artículo (ART), números de serie, marcas de repuestos.
-    - Medidas, especificaciones técnicas.
 
-    🚫 REGLAS ESTRICTAS - SUSPENDER INMEDIATAMENTE SI HAY:
+    🚫 REGLAS ESTRICTAS - SUSPENDER SI HAY:
     1. Teléfonos/WhatsApp (ej. "0981123456", "+595...").
-    2. Números camuflados con palabras o símbolos (ej. "cero nueve ocho", "0-9-8-...").
-    3. Arrobas (@) con nombres de usuario de redes sociales.
-    4. Enlaces web, correos electrónicos.
-    5. Frases de contacto: "escribime", "contactame al", "mi numero es".
+    2. Arrobas (@) con usuarios de redes sociales.
+    3. Enlaces web, correos electrónicos.
+    4. Frases de contacto directo: "escribime", "contactame al", "mi whatsapp".
 
     Responde EXACTAMENTE:
-    APROBAR
-    o
-    SUSPENDER: [motivo]
+    APROBAR o SUSPENDER
     """
     payload = {
-        "contents": [{"parts": [{"text": prompt_texto}]}],
-        "generationConfig": {"temperature": 0.1, "maxOutputTokens": 100}
+        "model": "llama-3.1-8b-instant",
+        "messages": [{"role": "user", "content": prompt_texto}],
+        "temperature": 0.1
     }
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
+    url = "https://api.groq.com/openai/v1/chat/completions"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {GROQ_API_KEY}"
+    }
 
     try:
-        resp = requests.post(url, json=payload, headers={"Content-Type": "application/json"}, timeout=20)
-        if resp.status_code != 200:
-            return "pending", f"Error Texto Google ({resp.status_code})"
-            
-        res_json = resp.json()
-        respuesta = res_json["candidates"][0]["content"]["parts"][0]["text"].strip()
+        resp = requests.post(url, json=payload, headers=headers, timeout=20)
+        respuesta = resp.json()["choices"][0]["message"]["content"].strip()
 
         if "SUSPENDER" in respuesta.upper():
-            motivo = respuesta.split(":", 1)[1].strip() if ":" in respuesta else "Contacto detectado en el texto."
-            return "suspended", f"Texto: {motivo}"
+            return "suspended", "Contacto detectado en el texto descriptivo."
         return "verified", "Aprobado automáticamente."
     except Exception as e:
         return "pending", f"Error IA Texto: {str(e)}"
@@ -329,7 +325,7 @@ def moderar_listing():
         if not listing_resp.data: return jsonify({"success": False, "error": "No encontrado"}), 404
         listing = listing_resp.data
 
-        decision, nota = analizar_listing_con_gemini(listing.get("title", ""), listing.get("description", ""), listing.get("image_url", ""))
+        decision, nota = analizar_listing_con_groq(listing.get("title", ""), listing.get("description", ""), listing.get("image_url", ""))
 
         update_data = {
             "moderation_status": decision,
@@ -357,7 +353,7 @@ def webhook_telegram():
     chat_id = data["message"]["chat"]["id"]
     texto = data["message"].get("text", "")
     try:
-        respuesta = consultar_gemini(texto, chat_id, "")
+        respuesta = consultar_groq(texto, chat_id, "")
         if TELEGRAM_BOT_TOKEN:
             requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", json={"chat_id": chat_id, "text": respuesta, "parse_mode": "HTML"}, timeout=10)
     except:
