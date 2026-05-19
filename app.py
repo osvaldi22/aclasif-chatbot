@@ -232,7 +232,7 @@ def analizar_imagen_con_groq(image_url):
     """
     
     payload = {
-        "model": "llama-3.2-11b-vision-preview", 
+        "model": "llama-3.2-11b-vision-instruct", 
         "messages": [
             {
                 "role": "user",
