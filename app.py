@@ -15,12 +15,11 @@ app = Flask(__name__)
 CORS(app)
 
 # ---------------------------
-# CONFIGURACIONES GROQ (CON TU CLAVE INYECTADA)
+# CONFIGURACIONES GROQ
 # ---------------------------
-# El código primero busca en Render, si no está ahí, usa tu clave directa automáticamente.
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY") 
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 
 # ---------- TELEGRAM ----------
 TELEGRAM_BOT_TOKEN = "8753872074:AAFub-e8qrfNhVvcLX46Kb_jpLUBzlSAJLA"
@@ -188,7 +187,7 @@ def obtener_historial(session_id):
     return jsonify({"messages": sesion["mensajes"]})
 
 # ---------------------------
-# MODERACIÓN DE TEXTO E IMÁGENES CON GROQ VISION 👁️
+# MODERACIÓN DE TEXTO E IMÁGENES CON GROQ VISION OFICIAL 👁️
 # ---------------------------
 def obtener_imagen_base64(image_url):
     try:
@@ -218,31 +217,35 @@ def analizar_imagen_con_groq(image_url):
     - Códigos de artículo, códigos ART, números de serie de fábrica o números de repuestos (ej. "ART-1234", "Ref: 9001").
     - Medidas, talles o especificaciones técnicas del artículo.
 
-    🚫 REGLAS ESTRICTAS - RESPONDE 'SUSPENDER' SI VES:
+    🚫 REGLAS ESTRICTAS - RECHAZA SI VES:
     1. Números de teléfono o WhatsApp escritos (ej. 0981, 0994, +595, o dígitos camuflados separados por puntos o espacios).
     2. Arrobas (@) con nombres de usuario de redes sociales (Instagram, TikTok, Facebook).
     3. Correos electrónicos (emails).
     4. Textos agregados a la foto que inviten a salir de la app: "contactame", "escribime", "mi whatsapp", "link en bio".
     5. Logos de WhatsApp o Instagram colocados para indicar contacto externo.
     
-    Responde EXACTAMENTE en este formato plano, sin asteriscos ni negritas:
-    APROBAR
-    o
-    SUSPENDER: [motivo corto de lo que viste]
+    Tu respuesta debe contener obligatoriamente una de estas dos palabras clave:
+    - Escribe 'SUSPENDER: [motivo]' si viola alguna regla estricta.
+    - Escribe 'APROBAR' si la imagen es segura y no tiene datos de contacto.
     """
     
     payload = {
-        "model": "llama-3.2-11b-vision-instruct", 
+        "model": "llama-3.2-90b-vision-preview", # Modelo de vision de 90B oficial de Groq
         "messages": [
             {
                 "role": "user",
                 "content": [
                     {"type": "text", "text": prompt_imagen},
-                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{imagen_b64}"}}
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/jpeg;base64,{imagen_b64}"
+                        }
+                    }
                 ]
             }
         ],
-        "temperature": 0.1,
+        "temperature": 0.0, # Modificación a cero para evitar creatividad
         "max_tokens": 100
     }
     
@@ -255,13 +258,22 @@ def analizar_imagen_con_groq(image_url):
     try:
         resp = requests.post(url, json=payload, headers=headers, timeout=25)
         if resp.status_code != 200:
+            print(f"Error detallado Groq: {resp.text}")
             return "PENDIENTE", f"Error API Groq Visión (Status {resp.status_code})"
             
-        respuesta = resp.json()["choices"][0]["message"]["content"].strip()
+        choices = resp.json().get("choices", [])
+        if not choices:
+            return "PENDIENTE", "Groq no devolvió respuesta - posible NSFW o bloqueo"
+            
+        respuesta = choices[0]["message"]["content"].strip()
 
         if "SUSPENDER" in respuesta.upper():
             motivo = respuesta.split(":", 1)[1].strip() if ":" in respuesta else "Contacto visual detectado en la imagen."
             return "SUSPENDER", motivo
+            
+        if "APROBAR" in respuesta.upper():
+            return "APROBAR", ""
+            
         return "APROBAR", ""
     except Exception as e:
         return "PENDIENTE", f"Error interno en radar de imagen: {str(e)}"
