@@ -193,7 +193,7 @@ def obtener_historial(session_id):
     return jsonify({"messages": sesion["mensajes"]})
 
 # ---------------------------
-# MODERACIÓN DE TEXTO E IMÁGENES CON GROQ VISION - LLAMA 3.2 90B 👁
+# MODERACIÓN DE TEXTO E IMÁGENES CON GROQ VISION - LLAMA 4 SCOUT 👁
 # ---------------------------
 def obtener_imagen_base64(image_url):
     try:
@@ -240,7 +240,7 @@ def analizar_imagen_con_groq(image_url):
     """
 
     payload = {
-        "model": "llama-3.2-90b-vision-preview", # ✅ EL MODELO OFICIAL QUE SÍ EXISTE EN GROQ
+        "model": "meta-llama/llama-4-scout-17b-16e-instruct",
         "messages": [
             {
                 "role": "user",
@@ -267,15 +267,15 @@ def analizar_imagen_con_groq(image_url):
 
     try:
         resp = requests.post(url, json=payload, headers=headers, timeout=30)
-
-        if resp.status_code!= 200:
+        
+        if resp.status_code != 200:
             print(f"Groq Vision Error {resp.status_code}: {resp.text}")
             return "PENDIENTE", f"Error API Groq Visión (Status {resp.status_code})"
-
+            
         data = resp.json()
         if "choices" not in data or not data["choices"]:
             return "PENDIENTE", "Groq no devolvió respuesta - posible imagen bloqueada"
-
+            
         respuesta = data["choices"][0]["message"]["content"].strip()
 
         if "SUSPENDER" in respuesta.upper():
@@ -433,19 +433,19 @@ def buscar_listing(producto="", article_code="", order=""):
                     if res.data: return res.data[0]
                 except: pass
 
-    posibles_codigos = [article_code] if article_code else []
-    if producto.upper().startswith("ART-"): posibles_codigos.append(producto)
-    for codigo in posibles_codigos:
-        try:
-            res = supabase.table("listings").select("*").ilike("article_code", f"%{codigo}%").limit(1).execute()
-            if res.data: return res.data[0]
-        except: pass
+        posibles_codigos = [article_code] if article_code else []
+        if producto.upper().startswith("ART-"): posibles_codigos.append(producto)
+        for codigo in posibles_codigos:
+            try:
+                res = supabase.table("listings").select("*").ilike("article_code", f"%{codigo}%").limit(1).execute()
+                if res.data: return res.data[0]
+            except: pass
 
-    if producto:
-        try:
-            res = supabase.table("listings").select("*").ilike("title", f"%{producto}%").limit(1).execute()
-            if res.data: return res.data[0]
-        except: pass
+        if producto:
+            try:
+                res = supabase.table("listings").select("*").ilike("title", f"%{producto}%").limit(1).execute()
+                if res.data: return res.data[0]
+            except: pass
     return None
 
 def buscar_perfil_vendedor(seller_id):
@@ -524,22 +524,22 @@ def notificar_compra():
         conversaciones[session_id]["compra"] = compra_contexto
 
     mensaje = f"""🚨 <b>NUEVA INTENCIÓN DE COMPRA</b> 🚨
-📦 <b>Producto:</b> {titulo_producto}
-🏷️ <b>Código (ART):</b> {codigo_articulo}
-💰 <b>Precio final:</b> {precio}
-🔗 <b>Link del artículo:</b> {link_articulo}
-📝 <b>N° de Orden:</b> {order}
+    📦 <b>Producto:</b> {titulo_producto}
+    🏷️ <b>Código (ART):</b> {codigo_articulo}
+    💰 <b>Precio final:</b> {precio}
+    🔗 <b>Link del artículo:</b> {link_articulo}
+    📝 <b>N° de Orden:</b> {order}
 
-🛒 <b>DATOS DEL COMPRADOR:</b>
-👤 Nombre: {nombre}
-📱 WhatsApp: {whatsapp}
-✉️ Email: {email}
+    🛒 <b>DATOS DEL COMPRADOR:</b>
+    👤 Nombre: {nombre}
+    📱 WhatsApp: {whatsapp}
+    ✉️ Email: {email}
 
-🏪 <b>DATOS DEL VENDEDOR:</b>
-👤 Nombre: {vendedor["vendedor_nombre"]}
-📱 WhatsApp: {vendedor["vendedor_whatsapp"]}
-🆔 ID Vendedor: {vendedor["seller_id"]}
-"""
+    🏪 <b>DATOS DEL VENDEDOR:</b>
+    👤 Nombre: {vendedor["vendedor_nombre"]}
+    📱 WhatsApp: {vendedor["vendedor_whatsapp"]}
+    🆔 ID Vendedor: {vendedor["seller_id"]}
+    """
     enviado = notificar_telegram(mensaje)
     return jsonify({"success": True, "telegram_enviado": enviado, "compra": compra_contexto})
 
