@@ -540,6 +540,32 @@ def notificar_compra():
     enviado = notificar_telegram(mensaje)
     return jsonify({"success": True, "telegram_enviado": enviado, "compra": compra_contexto})
 
+# ---------------------------
+# NUEVA RUTA: CONSULTA DIRECTA DESDE LA WEB SIN SALIR A TELEGRAM 🚀
+# ---------------------------
+@app.route("/api/consulta-web", methods=["POST"])
+def consulta_web():
+    data = request.json or {}
+    nombre = valor_limpio(data.get("nombre"), default="Anónimo")
+    telefono = valor_limpio(data.get("telefono"), default="No especificado")
+    mensaje = valor_limpio(data.get("mensaje"), default="")
+    articulo_codigo = valor_limpio(data.get("codigo_art"), default="General / Footer")
+
+    if not mensaje:
+        return jsonify({"success": False, "error": "El mensaje de la consulta está vacío"}), 400
+
+    texto_telegram = f"""💬 <b>NUEVA CONSULTA EN LA WEB</b> 💬
+
+📦 <b>Artículo de Interés:</b> {articulo_codigo}
+👤 <b>Nombre del Cliente:</b> {nombre}
+📱 <b>WhatsApp de Contacto:</b> {telefono}
+
+✉️ <b>Mensaje enviado:</b>
+<i>{mensaje}</i>
+"""
+    enviado = notificar_telegram(texto_telegram)
+    return jsonify({"success": enviado})
+
 @app.route("/", methods=["GET"])
 def home():
     return jsonify({"status": "ok", "frontend_url": FRONTEND_URL, "groq_configured": bool(GROQ_API_KEY)})
