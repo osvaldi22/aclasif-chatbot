@@ -15,10 +15,9 @@ app = Flask(__name__)
 CORS(app)
 
 # ---------------------------
-# CONFIGURACIONES
+# CONFIGURACIONES (AHORA 100% SEGURAS DESDE RENDER)
 # ---------------------------
-# TU LLAVE DIRECTA DE GEMINI FLASH 2.0
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "AIzaSyDADirCZdxJjrAO4FSE1-xirWZjHYHPlSk")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY") 
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 
@@ -43,7 +42,7 @@ REGLAS DE ORO ABSOLUTAS:
 - NUNCA le digas al cliente que contacte o hable directamente con el vendedor original.
 - NUNCA digas que no manejamos pagos. Nosotros gestionamos el cobro por seguridad.
 - NO des nombres propios de asesores ni dueños (prohibido decir nombres).
-- ⚠️ REGLA DE FORMATO: NO uses formato Markdown. NO uses asteriscos (**) ni negritas. Escribe TODO en texto plano limpio.
+- ⚠️ REGLA DE FORMATO: NO USES formato Markdown. NO uses asteriscos (**) ni negritas. Escribe TODO en texto plano limpio.
 
 PROCESO DE COMPRA OFICIAL:
 1. Confirma la recepción del artículo o código de manera breve y profesional.
@@ -186,7 +185,7 @@ def obtener_historial(session_id):
     return jsonify({"messages": sesion["mensajes"]})
 
 # ---------------------------
-# MODERACIÓN VISUAL Y TEXTUAL ESTRICTA CON GEMINI (Ojos de IA)
+# MODERACIÓN VISUAL PURA (Ojos de IA)
 # ---------------------------
 def obtener_imagen_base64(image_url):
     try:
@@ -194,73 +193,85 @@ def obtener_imagen_base64(image_url):
         resp.raise_for_status()
         img = Image.open(BytesIO(resp.content))
         if img.mode != 'RGB': img = img.convert('RGB')
-        img.thumbnail((1024, 1024))
+        img.thumbnail((800, 800))
         buffer = BytesIO()
-        img.save(buffer, format="JPEG", quality=85)
+        img.save(buffer, format="JPEG", quality=80)
         return base64.b64encode(buffer.getvalue()).decode('utf-8')
-    except:
+    except Exception as e:
+        print("Error al descargar imagen:", str(e))
         return None
 
 def analizar_imagen_con_gemini(image_url):
     if not image_url: return "APROBAR", ""
     
     imagen_b64 = obtener_imagen_base64(image_url)
-    if not imagen_b64: return "PENDIENTE", "No se pudo descargar la imagen para analizar."
+    if not imagen_b64: return "PENDIENTE", "No se pudo descargar o procesar el archivo de imagen."
 
-    prompt_imagen = """Eres el moderador oficial de seguridad de Aclasif. Actúa con OJO DE ÁGUILA.
-    Tu objetivo es detectar INTENTOS DE EVASIÓN (datos de contacto) en esta imagen.
+    prompt_imagen = """Eres el moderador oficial de seguridad de Aclasif. Actúas con OJO DE ÁGUILA humano.
+    Analizá esta imagen detalladamente. Tu único objetivo es detectar INTENTOS DE EVASIÓN (datos de contacto personales).
     
-    ✅ EXCEPCIONES IMPORTANTES (DEBES APROBAR ESTO):
-    - Marcas comerciales del producto (ej. marcas de repuestos, ropa, electrónica).
-    - Códigos de artículo, códigos ART, números de serie de fábrica o números de repuestos (ej. "ART-1234", "Ref: 9001").
-    - Medidas, talles, precios o especificaciones técnicas.
+    ✅ EXCEPCIONES IMPORTANTES (DEBÉS APROBAR ESTO):
+    - Marcas comerciales legítimas impresas en el producto (ej. marcas de relojes como Curren, repuestos, ropa, electrónica).
+    - Códigos de artículo, códigos ART, números de serie de fábrica o números de repuestos (ej. "ART-1234", "Ref: 9001", números de pieza).
+    - Medidas, talles, precios o especificaciones técnicas del artículo.
 
-    🚫 REGLAS ESTRICTAS - SUSPENDER INMEDIATAMENTE SI VES:
-    1. Números de teléfono o WhatsApp (ej. 0981, 0994, +595, dígitos camuflados separados por puntos o espacios).
-    2. Arrobas (@) con nombres de usuario (ej. @juanperez, @ventas_py) que dirijan a Instagram, TikTok o Twitter.
-    3. Correos electrónicos explícitos.
-    4. Textos que inviten a salir de la app: "contactame", "escribime", "mi whatsapp", "link en bio".
-    5. Logos sueltos de WhatsApp, Instagram, Facebook o Telegram usados para invitar al contacto externo.
+    🚫 REGLAS ESTRICTAS - RESPONDÉ 'SUSPENDER' INMEDIATAMENTE SI VES:
+    1. Números de teléfono o WhatsApp escritos (ej. 0981, 0994, +595, o números camuflados separados por puntos/espacios).
+    2. Arrobas (@) seguidas de nombres de usuario que apunten a redes sociales (Instagram, TikTok, Facebook).
+    3. Correos electrónicos (emails).
+    4. Textos que inviten a salir de la plataforma: "contactame", "escribime", "mi whatsapp", "link en bio".
+    5. Logos o iconos de WhatsApp, Instagram, Facebook o Telegram colocados para contacto externo.
     
-    Responde EXACTAMENTE en este formato:
-    - "APROBAR" (si la foto está limpia de datos de contacto, aunque tenga códigos de fábrica o marcas).
-    - "SUSPENDER: [motivo detallado indicando qué viste exactamente]" (si hay ALGO sospechoso).
+    Respondé EXACTAMENTE en este formato, sin usar negritas ni asteriscos:
+    APROBAR
+    o
+    SUSPENDER: [motivo detallado en texto plano]
     """
     
     payload = {
-        "systemInstruction": {"parts": [{"text": "Eres un moderador estricto pero justo. Solo respondes APROBAR o SUSPENDER."}]},
         "contents": [
             {
-                "role": "user", 
                 "parts": [
                     {"text": prompt_imagen},
-                    {"inline_data": {"mime_type": "image/jpeg", "data": imagen_b64}}
+                    {"inlineData": {"mimeType": "image/jpeg", "data": imagen_b64}}
                 ]
             }
         ],
         "generationConfig": {"temperature": 0.1, "maxOutputTokens": 100}
     }
+    
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
     
     try:
         resp = requests.post(url, json=payload, headers={"Content-Type": "application/json"}, timeout=25)
-        resp.raise_for_status()
-        respuesta = resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+        
+        if resp.status_code != 200:
+            return "PENDIENTE", f"Error API Google (Status {resp.status_code}): {resp.text[:120]}"
+            
+        res_json = resp.json()
+        if "candidates" not in res_json or not res_json["candidates"]:
+            return "PENDIENTE", "Google bloqueó la respuesta por políticas o vino vacía."
+            
+        candidate = res_json["candidates"][0]
+        if "content" not in candidate or "parts" not in candidate["content"]:
+            return "PENDIENTE", f"Respuesta sin contenido estructurado. Razón: {candidate.get('finishReason', 'Desconocida')}"
+            
+        respuesta = candidate["content"]["parts"][0]["text"].strip()
 
-        if respuesta.upper().startswith("SUSPENDER"):
-            motivo = respuesta.split(":", 1)[1].strip() if ":" in respuesta else "Contacto visual detectado."
+        if "SUSPENDER" in respuesta.upper():
+            motivo = respuesta.split(":", 1)[1].strip() if ":" in respuesta else "Contacto visual detectado en la imagen."
             return "SUSPENDER", motivo
+            
         return "APROBAR", ""
     except Exception as e:
-        print("Error Imagen Gemini:", str(e))
-        return "PENDIENTE", "Fallo al analizar la imagen visualmente."
+        return "PENDIENTE", f"Error interno en la petición: {str(e)}"
 
 def analizar_listing_con_gemini(title, description, image_url=None):
     decision_imagen, motivo_imagen = "APROBAR", ""
     if image_url: 
         decision_imagen, motivo_imagen = analizar_imagen_con_gemini(image_url)
 
-    if decision_imagen == "PENDIENTE": return "pending", f"Imagen en duda: {motivo_imagen}"
+    if decision_imagen == "PENDIENTE": return "pending", f"Fallo de radar: {motivo_imagen}"
     elif decision_imagen == "SUSPENDER": return "suspended", f"Imagen: {motivo_imagen}"
 
     prompt_texto = f"""Eres un moderador automático IMPLACABLE de Aclasif.
@@ -281,27 +292,30 @@ def analizar_listing_con_gemini(title, description, image_url=None):
     5. Frases de contacto: "escribime", "contactame al", "mi numero es".
 
     Responde EXACTAMENTE:
-    - "APROBAR" (si el texto está limpio de datos de contacto)
-    - "SUSPENDER: [motivo]" (si encuentras el más mínimo intento de contacto)
+    APROBAR
+    o
+    SUSPENDER: [motivo]
     """
     payload = {
-        "systemInstruction": {"parts": [{"text": "Solo respondes APROBAR o SUSPENDER."}]},
-        "contents": [{"role": "user", "parts": [{"text": prompt_texto}]}],
+        "contents": [{"parts": [{"text": prompt_texto}]}],
         "generationConfig": {"temperature": 0.1, "maxOutputTokens": 100}
     }
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
 
     try:
         resp = requests.post(url, json=payload, headers={"Content-Type": "application/json"}, timeout=20)
-        resp.raise_for_status()
-        respuesta = resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+        if resp.status_code != 200:
+            return "pending", f"Error Texto Google ({resp.status_code})"
+            
+        res_json = resp.json()
+        respuesta = res_json["candidates"][0]["content"]["parts"][0]["text"].strip()
 
-        if respuesta.upper().startswith("SUSPENDER"):
-            motivo = respuesta.split(":", 1)[1].strip() if ":" in respuesta else "Contacto en texto."
+        if "SUSPENDER" in respuesta.upper():
+            motivo = respuesta.split(":", 1)[1].strip() if ":" in respuesta else "Contacto detectado en el texto."
             return "suspended", f"Texto: {motivo}"
         return "verified", "Aprobado automáticamente."
     except Exception as e:
-        return "pending", f"Error IA: {str(e)}"
+        return "pending", f"Error IA Texto: {str(e)}"
 
 @app.route("/api/moderar-listing", methods=["POST"])
 def moderar_listing():
@@ -328,7 +342,7 @@ def moderar_listing():
         supabase.table("listings").update(update_data).eq("id", listing_id).execute()
 
         if decision == "pending": 
-            notificar_telegram(f"⚠️ Publicación en revisión manual\nTítulo: {listing.get('title', '')}\nID: {listing_id}")
+            notificar_telegram(f"⚠️ Publicación en revisión manual\nTítulo: {listing.get('title', '')}\nMotivo: {nota}\nID: {listing_id}")
         return jsonify({"success": True, "listing_id": listing_id, "decision": decision, "nota": nota})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
