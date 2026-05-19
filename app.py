@@ -1,5 +1,4 @@
 import os
-import uuid
 import requests
 import base64
 from io import BytesIO
@@ -18,7 +17,8 @@ CORS(app)
 # ---------------------------
 # CONFIGURACIONES
 # ---------------------------
-DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY")
+# TU LLAVE DIRECTA DE GEMINI FLASH 2.0
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "AIzaSyDADirCZdxJjrAO4FSE1-xirWZjHYHPlSk")
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 
@@ -34,7 +34,7 @@ if SUPABASE_URL and SUPABASE_KEY:
     supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # ---------------------------
-# PROMPT DEL ASISTENTE
+# PROMPT DEL ASISTENTE (CHATBOT)
 # ---------------------------
 SYSTEM_PROMPT = """
 Sos el asistente oficial de Aclasif 🇵🇾.
@@ -72,40 +72,32 @@ conversaciones = {}
 # ---------------------------
 # FUNCIONES DE UTILIDAD
 # ---------------------------
-
 def valor_limpio(*valores, default="No especificado"):
     for valor in valores:
-        if valor is None:
-            continue
+        if valor is None: continue
         texto = str(valor).strip()
-        if texto:
-            return texto
+        if texto: return texto
     return default
 
 def normalizar_texto(valor):
     return str(valor or "").strip()
 
 def formatear_precio(valor):
-    if valor is None:
-        return "No especificado"
+    if valor is None: return "No especificado"
     texto = str(valor).strip()
-    if not texto or texto.lower() in ["none", "null", "nan"]:
-        return "No especificado"
-    if "Gs" in texto or "₲" in texto or "USD" in texto or "$" in texto:
-        return texto
+    if not texto or texto.lower() in ["none", "null", "nan"]: return "No especificado"
+    if "Gs" in texto or "₲" in texto or "USD" in texto or "$" in texto: return texto
     texto_num = texto.replace(".", "", texto.count(".") - 1) if texto.count(".") > 1 else texto
     texto_num = texto_num.replace(",", ".")
     try:
         numero = float(texto_num)
-        if numero.is_integer():
-            return f"Gs. {int(numero):,}".replace(",", ".")
+        if numero.is_integer(): return f"Gs. {int(numero):,}".replace(",", ".")
         return f"Gs. {numero:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
     except:
         return texto
 
 def crear_contexto_compra_texto(compra):
-    if not compra:
-        return ""
+    if not compra: return ""
     return f"""
 CONTEXTO INTERNO DE LA COMPRA ACTUAL:
 - N° de Orden: {compra.get("order", "No especificado")}
@@ -120,27 +112,33 @@ CONTEXTO INTERNO DE LA COMPRA ACTUAL:
 - WhatsApp vendedor: {compra.get("vendedor_whatsapp", "No especificado")}
 """
 
-def consultar_deepseek(mensaje, session_id, extra_context=""):
+def consultar_gemini(mensaje, session_id, extra_context=""):
     if session_id not in conversaciones:
-        conversaciones[session_id] = {
-            "mensajes": [],
-            "ultimo_mensaje": datetime.now(timezone.utc).isoformat(),
-            "user_id": None,
-            "compra": None
-        }
+        conversaciones[session_id] = {"mensajes": [], "ultimo_mensaje": datetime.now(timezone.utc).isoformat(), "user_id": None, "compra": None}
     sesion = conversaciones[session_id]
     sesion["ultimo_mensaje"] = datetime.now(timezone.utc).isoformat()
-    messages = [{"role": "system", "content": SYSTEM_PROMPT + extra_context}]
+    
+    contents = []
     for msg in sesion["mensajes"][-10:]:
-        messages.append(msg)
-    messages.append({"role": "user", "content": mensaje})
+        role = "user" if msg["role"] == "user" else "model"
+        contents.append({"role": role, "parts": [{"text": msg["content"]}]})
+    
+    contents.append({"role": "user", "parts": [{"text": mensaje}]})
 
-    headers = {"Authorization": f"Bearer {DEEPSEEK_API_KEY}", "Content-Type": "application/json"}
-    payload = {"model": "deepseek-chat", "messages": messages, "temperature": 0.3, "max_tokens": 500}
+    payload = {
+        "systemInstruction": {"parts": [{"text": SYSTEM_PROMPT + extra_context}]},
+        "contents": contents,
+        "generationConfig": {"temperature": 0.3, "maxOutputTokens": 500}
+    }
 
-    resp = requests.post("https://api.deepseek.com/v1/chat/completions", json=payload, headers=headers, timeout=30)
-    resp.raise_for_status()
-    respuesta = resp.json()["choices"][0]["message"]["content"]
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
+    try:
+        resp = requests.post(url, json=payload, headers={"Content-Type": "application/json"}, timeout=30)
+        resp.raise_for_status()
+        respuesta = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
+    except Exception as e:
+        print("Error Gemini Chat:", str(e))
+        respuesta = "Lo siento, tuve un pequeño problema de conexión. ¿Me repetís kape?"
 
     sesion["mensajes"].append({"role": "user", "content": mensaje})
     sesion["mensajes"].append({"role": "assistant", "content": respuesta})
@@ -150,17 +148,13 @@ def notificar_telegram(mensaje):
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_ADMIN_BOT_TOKEN}/sendMessage"
         resp = requests.post(url, json={"chat_id": TELEGRAM_ADMIN_CHAT_ID, "text": mensaje, "parse_mode": "HTML"}, timeout=15)
-        if resp.status_code == 200:
-            return True
-        else:
-            return f"Error API Telegram: {resp.text}"
-    except Exception as e:
-        return f"Error Interno: {str(e)}"
+        return resp.status_code == 200
+    except:
+        return False
 
 # ---------------------------
 # ENDPOINTS DEL CHAT
 # ---------------------------
-
 @app.route("/api/chat-web", methods=["POST"])
 def chat_web():
     data = request.json or {}
@@ -170,14 +164,13 @@ def chat_web():
 
     if session_id not in conversaciones:
         conversaciones[session_id] = {"mensajes": [], "ultimo_mensaje": datetime.now(timezone.utc).isoformat(), "user_id": user_id, "compra": None}
-
     sesion = conversaciones[session_id]
     sesion["ultimo_mensaje"] = datetime.now(timezone.utc).isoformat()
     if user_id: sesion["user_id"] = user_id
 
     try:
-        respuesta = consultar_deepseek(mensaje, session_id, crear_contexto_compra_texto(sesion.get("compra")))
-    except Exception as e:
+        respuesta = consultar_gemini(mensaje, session_id, crear_contexto_compra_texto(sesion.get("compra")))
+    except:
         respuesta = "Lo siento, tuve un problema de conexión. ¿Me repetís kape?"
 
     palabras_reclamo = ["reclamo", "estafa", "no recibí", "abogado", "devuelvan", "reembolso"]
@@ -193,137 +186,120 @@ def obtener_historial(session_id):
     return jsonify({"messages": sesion["mensajes"]})
 
 # ---------------------------
-# OCR Y MODERACIÓN
+# MODERACIÓN VISUAL Y TEXTUAL ESTRICTA CON GEMINI (Ojos de IA)
 # ---------------------------
-
-def extraer_texto_de_imagen(image_url: str) -> str:
+def obtener_imagen_base64(image_url):
     try:
-        img_resp = requests.get(image_url, timeout=15)
-        img_resp.raise_for_status()
-        
-        img = Image.open(BytesIO(img_resp.content))
-        if img.mode != 'RGB':
-            img = img.convert('RGB')
+        resp = requests.get(image_url, timeout=15)
+        resp.raise_for_status()
+        img = Image.open(BytesIO(resp.content))
+        if img.mode != 'RGB': img = img.convert('RGB')
         img.thumbnail((1024, 1024))
-        
         buffer = BytesIO()
         img.save(buffer, format="JPEG", quality=85)
-        
-        imagen_b64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
-        base64_str = f"data:image/jpeg;base64,{imagen_b64}"
+        return base64.b64encode(buffer.getvalue()).decode('utf-8')
+    except:
+        return None
 
-        api_url = "https://api.ocr.space/parse/image"
-        api_key = os.environ.get("OCR_API_KEY", "helloworld")
-        
-        payload = {
-            "apikey": api_key,
-            "base64Image": base64_str,
-            "language": "spa",
-            "isOverlayRequired": False,
-            "scale": True,
-            "OCREngine": 2
-        }
-        
-        resp = requests.post(api_url, data=payload, timeout=25)
-        resp.raise_for_status()
-        resultado = resp.json()
-
-        if resultado.get("IsErroredOnProcessing"):
-            return "ERROR_RADAR"
-
-        textos = [item.get("ParsedText", "") for item in resultado.get("ParsedResults", []) if item.get("ParsedText")]
-        texto_final = " ".join(textos).strip()
-        
-        if not texto_final:
-            return "VACIO"
-
-        return texto_final
-
-    except Exception as e:
-        return "ERROR_RADAR"
-
-def analizar_imagen_con_deepseek(image_url):
+def analizar_imagen_con_gemini(image_url):
     if not image_url: return "APROBAR", ""
     
-    texto_extraido = extraer_texto_de_imagen(image_url)
+    imagen_b64 = obtener_imagen_base64(image_url)
+    if not imagen_b64: return "PENDIENTE", "No se pudo descargar la imagen para analizar."
+
+    prompt_imagen = """Eres el moderador oficial de seguridad de Aclasif. Actúa con OJO DE ÁGUILA.
+    Tu objetivo es detectar INTENTOS DE EVASIÓN (datos de contacto) en esta imagen.
     
-    if texto_extraido == "ERROR_RADAR":
-        return "PENDIENTE", "El radar falló. Requiere revisión manual obligatoria."
+    ✅ EXCEPCIONES IMPORTANTES (DEBES APROBAR ESTO):
+    - Marcas comerciales del producto (ej. marcas de repuestos, ropa, electrónica).
+    - Códigos de artículo, códigos ART, números de serie de fábrica o números de repuestos (ej. "ART-1234", "Ref: 9001").
+    - Medidas, talles, precios o especificaciones técnicas.
+
+    🚫 REGLAS ESTRICTAS - SUSPENDER INMEDIATAMENTE SI VES:
+    1. Números de teléfono o WhatsApp (ej. 0981, 0994, +595, dígitos camuflados separados por puntos o espacios).
+    2. Arrobas (@) con nombres de usuario (ej. @juanperez, @ventas_py) que dirijan a Instagram, TikTok o Twitter.
+    3. Correos electrónicos explícitos.
+    4. Textos que inviten a salir de la app: "contactame", "escribime", "mi whatsapp", "link en bio".
+    5. Logos sueltos de WhatsApp, Instagram, Facebook o Telegram usados para invitar al contacto externo.
     
-    if texto_extraido == "VACIO":
-        return "APROBAR", ""
-
-    prompt = f"""Analiza el siguiente texto extraído de la imagen de un producto.
-Tu objetivo es ser EXTREMADAMENTE ESTRICTO, IMPLACABLE, y detectar DATOS DE CONTACTO PERSONALES.
-
-TEXTO EXTRAÍDO: {texto_extraido}
-
-REGLAS ESTRICTAS - DEBES SUSPENDER INMEDIATAMENTE SI HAY:
-1. Números de teléfono o WhatsApp (ej. 0981, 0994, +595...).
-2. Números camuflados con símbolos o espacios (ej. 0.9.5..5, 0-9-8, 0 9 8 1, cero nueve ocho).
-3. Nombres de redes sociales (Instagram, Facebook, Telegram, @usuario, fb, ig).
-4. Direcciones físicas, emails, o links a otras webs.
-5. Frases que inviten al contacto externo (ej. "contactame", "escribime al", "mi numero", "socios", "dropshipping").
-
-Responde EXACTAMENTE en este formato:
-- "APROBAR" (solo si el texto es descriptivo del producto y no tiene NADA de contacto).
-- "SUSPENDER: [motivo detallado]" (si hay cualquier dato de contacto o intento de evasión).
-"""
-    headers = {"Authorization": f"Bearer {DEEPSEEK_API_KEY}", "Content-Type": "application/json"}
-    payload = {"model": "deepseek-chat", "messages": [{"role": "system", "content": "Eres un moderador estricto. Solo respondes APROBAR o SUSPENDER."}, {"role": "user", "content": prompt}], "temperature": 0.1, "max_tokens": 100}
-
+    Responde EXACTAMENTE en este formato:
+    - "APROBAR" (si la foto está limpia de datos de contacto, aunque tenga códigos de fábrica o marcas).
+    - "SUSPENDER: [motivo detallado indicando qué viste exactamente]" (si hay ALGO sospechoso).
+    """
+    
+    payload = {
+        "systemInstruction": {"parts": [{"text": "Eres un moderador estricto pero justo. Solo respondes APROBAR o SUSPENDER."}]},
+        "contents": [
+            {
+                "role": "user", 
+                "parts": [
+                    {"text": prompt_imagen},
+                    {"inline_data": {"mime_type": "image/jpeg", "data": imagen_b64}}
+                ]
+            }
+        ],
+        "generationConfig": {"temperature": 0.1, "maxOutputTokens": 100}
+    }
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
+    
     try:
-        resp = requests.post("https://api.deepseek.com/v1/chat/completions", json=payload, headers=headers, timeout=20)
+        resp = requests.post(url, json=payload, headers={"Content-Type": "application/json"}, timeout=25)
         resp.raise_for_status()
-        respuesta = resp.json()["choices"][0]["message"]["content"].strip()
+        respuesta = resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
 
         if respuesta.upper().startswith("SUSPENDER"):
-            motivo = respuesta.split(":", 1)[1].strip() if ":" in respuesta else "Contacto oculto en imagen."
+            motivo = respuesta.split(":", 1)[1].strip() if ":" in respuesta else "Contacto visual detectado."
             return "SUSPENDER", motivo
         return "APROBAR", ""
     except Exception as e:
-        return "PENDIENTE", "La IA no pudo procesar el texto de la imagen."
+        print("Error Imagen Gemini:", str(e))
+        return "PENDIENTE", "Fallo al analizar la imagen visualmente."
 
-def analizar_listing_con_deepseek(title, description, image_url=None):
+def analizar_listing_con_gemini(title, description, image_url=None):
     decision_imagen, motivo_imagen = "APROBAR", ""
     if image_url: 
-        decision_imagen, motivo_imagen = analizar_imagen_con_deepseek(image_url)
+        decision_imagen, motivo_imagen = analizar_imagen_con_gemini(image_url)
 
-    if decision_imagen == "PENDIENTE":
-        return "pending", f"Imagen en duda: {motivo_imagen}"
-    elif decision_imagen == "SUSPENDER":
-        return "suspended", f"Imagen: {motivo_imagen}"
+    if decision_imagen == "PENDIENTE": return "pending", f"Imagen en duda: {motivo_imagen}"
+    elif decision_imagen == "SUSPENDER": return "suspended", f"Imagen: {motivo_imagen}"
 
-    prompt = f"""Eres un moderador automático IMPLACABLE de Aclasif.
-Detecta DATOS DE CONTACTO PERSONALES DIRECTOS O CAMUFLADOS en el título/descripción.
+    prompt_texto = f"""Eres un moderador automático IMPLACABLE de Aclasif.
+    Detecta DATOS DE CONTACTO PERSONALES en el título/descripción.
 
-TÍTULO: {title}
-DESCRIPCIÓN: {description}
+    TÍTULO: {title}
+    DESCRIPCIÓN: {description}
 
-REGLAS ESTRICTAS - SUSPENDER INMEDIATAMENTE SI HAY:
-1. Teléfonos/WhatsApp (ej. "0981123456", "+595 994...").
-2. Números camuflados (ej. "0.9.8.1...", "cero nueve ocho...", "0-9-8-...", "0981 y 123 y 456").
-3. Redes sociales o links: instagram, ig, facebook, fb, @usuario, t.me, telegram.
-4. Frases de contacto directo: "escribime", "contactame al", "mi whatsapp", "mi numero es".
-5. Direcciones exactas intentando evadir la plataforma.
+    ✅ PERMITIDO (DEBES APROBAR):
+    - Códigos de artículo (ART), números de serie, marcas de repuestos.
+    - Medidas, especificaciones técnicas.
 
-Responde EXACTAMENTE:
-- "APROBAR" (solo si el texto está 100% limpio)
-- "SUSPENDER: [motivo]" (si encuentras el más mínimo intento de contacto)
-"""
-    headers = {"Authorization": f"Bearer {DEEPSEEK_API_KEY}", "Content-Type": "application/json"}
-    payload = {"model": "deepseek-chat", "messages": [{"role": "system", "content": "Solo respondes APROBAR o SUSPENDER."}, {"role": "user", "content": prompt}], "temperature": 0.1, "max_tokens": 100}
+    🚫 REGLAS ESTRICTAS - SUSPENDER INMEDIATAMENTE SI HAY:
+    1. Teléfonos/WhatsApp (ej. "0981123456", "+595...").
+    2. Números camuflados con palabras o símbolos (ej. "cero nueve ocho", "0-9-8-...").
+    3. Arrobas (@) con nombres de usuario de redes sociales.
+    4. Enlaces web, correos electrónicos.
+    5. Frases de contacto: "escribime", "contactame al", "mi numero es".
+
+    Responde EXACTAMENTE:
+    - "APROBAR" (si el texto está limpio de datos de contacto)
+    - "SUSPENDER: [motivo]" (si encuentras el más mínimo intento de contacto)
+    """
+    payload = {
+        "systemInstruction": {"parts": [{"text": "Solo respondes APROBAR o SUSPENDER."}]},
+        "contents": [{"role": "user", "parts": [{"text": prompt_texto}]}],
+        "generationConfig": {"temperature": 0.1, "maxOutputTokens": 100}
+    }
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
 
     try:
-        resp = requests.post("https://api.deepseek.com/v1/chat/completions", json=payload, headers=headers, timeout=20)
+        resp = requests.post(url, json=payload, headers={"Content-Type": "application/json"}, timeout=20)
         resp.raise_for_status()
-        respuesta = resp.json()["choices"][0]["message"]["content"].strip()
+        respuesta = resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
 
         if respuesta.upper().startswith("SUSPENDER"):
             motivo = respuesta.split(":", 1)[1].strip() if ":" in respuesta else "Contacto en texto."
             return "suspended", f"Texto: {motivo}"
-        else: 
-            return "verified", "Aprobado automáticamente."
+        return "verified", "Aprobado automáticamente."
     except Exception as e:
         return "pending", f"Error IA: {str(e)}"
 
@@ -339,7 +315,7 @@ def moderar_listing():
         if not listing_resp.data: return jsonify({"success": False, "error": "No encontrado"}), 404
         listing = listing_resp.data
 
-        decision, nota = analizar_listing_con_deepseek(listing.get("title", ""), listing.get("description", ""), listing.get("image_url", ""))
+        decision, nota = analizar_listing_con_gemini(listing.get("title", ""), listing.get("description", ""), listing.get("image_url", ""))
 
         update_data = {
             "moderation_status": decision,
@@ -360,16 +336,14 @@ def moderar_listing():
 # ---------------------------
 # WEBHOOK TELEGRAM PÚBLICO
 # ---------------------------
-
 @app.route("/webhook/telegram", methods=["POST"])
 def webhook_telegram():
     data = request.json or {}
     if "message" not in data: return "OK", 200
     chat_id = data["message"]["chat"]["id"]
     texto = data["message"].get("text", "")
-
     try:
-        respuesta = consultar_deepseek(texto, chat_id, "")
+        respuesta = consultar_gemini(texto, chat_id, "")
         if TELEGRAM_BOT_TOKEN:
             requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", json={"chat_id": chat_id, "text": respuesta, "parse_mode": "HTML"}, timeout=10)
     except:
@@ -379,7 +353,6 @@ def webhook_telegram():
 # ---------------------------
 # COMPRA / TELEGRAM / SUPABASE
 # ---------------------------
-
 def buscar_order(order):
     if not supabase: return None
     order = normalizar_texto(order)
