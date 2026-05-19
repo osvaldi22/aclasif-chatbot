@@ -15,11 +15,14 @@ app = Flask(__name__)
 CORS(app)
 
 # ---------------------------
-# CONFIGURACIONES GROQ
+# CONFIGURACIONES
 # ---------------------------
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
+
+if not GROQ_API_KEY:
+    print("⚠️ WARNING: GROQ_API_KEY no está configurada")
 
 # ---------- TELEGRAM ----------
 TELEGRAM_BOT_TOKEN = "8753872074:AAFub-e8qrfNhVvcLX46Kb_jpLUBzlSAJLA"
@@ -103,7 +106,7 @@ CONTEXTO INTERNO DE LA COMPRA ACTUAL:
 - Producto: {compra.get("titulo_producto", compra.get("producto", "No especificado"))}
 - Código ART: {compra.get("codigo_articulo", compra.get("article_code", "No especificado"))}
 - Precio: {compra.get("precio", "No especificado")}
-- Link del artículo: {compra.get("link_articulo", "No weddings specified")}
+- Link del artículo: {compra.get("link_articulo", "No especificado")}
 - Nombre comprador: {compra.get("nombre", "No especificado")}
 - WhatsApp comprador: {compra.get("whatsapp", "No especificado")}
 - Email comprador: {compra.get("email", "No especificado")}
@@ -112,6 +115,9 @@ CONTEXTO INTERNO DE LA COMPRA ACTUAL:
 """
 
 def consultar_groq(mensaje, session_id, extra_context=""):
+    if not GROQ_API_KEY:
+        return "Error de configuración: Falta GROQ_API_KEY"
+
     if session_id not in conversaciones:
         conversaciones[session_id] = {"mensajes": [], "ultimo_mensaje": datetime.now(timezone.utc).isoformat(), "user_id": None, "compra": None}
     sesion = conversaciones[session_id]
@@ -187,15 +193,15 @@ def obtener_historial(session_id):
     return jsonify({"messages": sesion["mensajes"]})
 
 # ---------------------------
-# MODERACIÓN DE TEXTO E IMÁGENES CON GROQ VISION (RE-CALIBRADO) 👁
+# MODERACIÓN DE TEXTO E IMÁGENES CON GROQ VISION - LLAMA 3.2 90B 👁
 # ---------------------------
 def obtener_imagen_base64(image_url):
     try:
         resp = requests.get(image_url, timeout=15)
         resp.raise_for_status()
         img = Image.open(BytesIO(resp.content))
-        if img.mode != 'RGB': img = img.convert('RGB')
-        img.thumbnail((1024, 1024)) # ✅ Aceptamos la mejora de Meta para más resolución
+        if img.mode!= 'RGB': img = img.convert('RGB')
+        img.thumbnail((1024, 1024))
         buffer = BytesIO()
         img.save(buffer, format="JPEG", quality=85)
         return base64.b64encode(buffer.getvalue()).decode('utf-8')
@@ -204,32 +210,37 @@ def obtener_imagen_base64(image_url):
         return None
 
 def analizar_imagen_con_groq(image_url):
+    if not GROQ_API_KEY:
+        return "PENDIENTE", "GROQ_API_KEY no configurada"
+
     if not image_url: return "APROBAR", ""
 
     imagen_b64 = obtener_imagen_base64(image_url)
     if not imagen_b64: return "PENDIENTE", "No se pudo descargar o procesar el archivo de imagen."
 
     prompt_imagen = """Eres el moderador de seguridad de Aclasif. Actúas con OJO DE ÁGUILA.
-Analiza esta imagen. Tu único objetivo es detectar DATOS DE CONTACTO PERSONALES para evitar evasión de comisiones.
+    Analiza esta imagen. Tu único objetivo es detectar DATOS DE CONTACTO PERSONALES para evitar evasión de comisiones.
 
-✅ EXCEPCIONES IMPORTANTES (DEBES APROBAR ESTO):
-- Marcas de fábrica grabadas en el producto (ej. marcas de relojes, repuestos, ropa, electrónica).
-- Códigos de artículo, códigos ART, números de serie de fábrica o números de repuestos (ej. "ART-1234", "Ref: 9001").
-- Medidas, talles o especificaciones técnicas del artículo.
+    ✅ EXCEPCIONES IMPORTANTES (DEBES APROBAR ESTO):
+    - Marcas de fábrica grabadas en el producto.
+    - Códigos de artículo, códigos ART, números de serie de fábrica o números de repuestos.
+    - Medidas, talles o especificaciones técnicas del artículo.
 
-🚫 REGLAS ESTRICTAS - RECHAZA SI VES:
-1. Números de teléfono o WhatsApp escritos (ej. 0981, 0994, +595, o dígitos camuflados separados por puntos o espacios).
-2. Arrobas (@) con nombres de usuario de redes sociales (Instagram, TikTok, Facebook).
-3. Correos electrónicos (emails).
-4. Textos agregados a la foto que inviten a salir de la app: "contactame", "escribime", "mi whatsapp", "link en bio".
-5. Logos de WhatsApp o Instagram colocados para indicar contacto externo.
+    🚫 REGLAS ESTRICTAS - RESPONDE 'SUSPENDER' SI VES:
+    1. Números de teléfono o WhatsApp escritos (ej. 0981, 0994, +595, o dígitos camuflados separados por puntos o espacios).
+    2. Arrobas (@) con nombres de usuario de redes sociales (Instagram, TikTok, Facebook).
+    3. Correos electrónicos (emails).
+    4. Textos agregados a la foto que inviten a salir de la app: "contactame", "escribime", "mi whatsapp", "link en bio".
+    5. Logos de WhatsApp o Instagram colocados para indicar contacto externo.
 
-Responde SOLO con una de estas dos opciones:
-SUSPENDER: [motivo corto]
-APROBAR"""
+    Responde EXACTAMENTE en este formato plano, sin asteriscos ni negritas:
+    APROBAR
+    o
+    SUSPENDER: [motivo corto de lo que viste]
+    """
 
     payload = {
-        "model": "llama-3.2-90b-vision-preview", # ✅ EL PAPÁ DE LOS MODELOS DE VISIÓN REAL EN GROQ
+        "model": "llama-3.2-90b-vision-preview", # ✅ EL MODELO OFICIAL QUE SÍ EXISTE EN GROQ
         "messages": [
             {
                 "role": "user",
@@ -255,25 +266,24 @@ APROBAR"""
     }
 
     try:
-        resp = requests.post(url, json=payload, headers=headers, timeout=30) # ✅ 30 segundos de aguante como pidió Meta
-        if resp.status_code != 200:
-            print(f"Error Groq Vision {resp.status_code}: {resp.text}")
+        resp = requests.post(url, json=payload, headers=headers, timeout=30)
+
+        if resp.status_code!= 200:
+            print(f"Groq Vision Error {resp.status_code}: {resp.text}")
             return "PENDIENTE", f"Error API Groq Visión (Status {resp.status_code})"
 
         data = resp.json()
-        choices = data.get("choices", [])
-        if not choices:
-            return "PENDIENTE", "Groq no devolvió respuesta - posible NSFW o bloqueo"
+        if "choices" not in data or not data["choices"]:
+            return "PENDIENTE", "Groq no devolvió respuesta - posible imagen bloqueada"
 
-        respuesta = choices[0]["message"]["content"].strip()
+        respuesta = data["choices"][0]["message"]["content"].strip()
 
         if "SUSPENDER" in respuesta.upper():
             motivo = respuesta.split(":", 1)[1].strip() if ":" in respuesta else "Contacto visual detectado en la imagen."
             return "SUSPENDER", motivo
-
         return "APROBAR", ""
     except Exception as e:
-        print(f"Exception Groq Vision: {str(e)}")
+        print("Exception Groq Vision:", str(e))
         return "PENDIENTE", f"Error interno en radar de imagen: {str(e)}"
 
 def analizar_listing_con_groq(title, description, image_url=None):
@@ -285,27 +295,27 @@ def analizar_listing_con_groq(title, description, image_url=None):
     elif decision_imagen == "SUSPENDER": return "suspended", f"Imagen: {motivo_imagen}"
 
     prompt_texto = f"""Eres un moderador automático IMPLACABLE de Aclasif.
-Detecta DATOS DE CONTACTO PERSONALES en el título/descripción.
+    Detecta DATOS DE CONTACTO PERSONALES en el título/descripción.
 
-TÍTULO: {title}
-DESCRIPCIÓN: {description}
+    TÍTULO: {title}
+    DESCRIPCIÓN: {description}
 
-✅ PERMITIDO (DEBES APROBAR):
-- Códigos de artículo (ART), números de serie, marcas de repuestos.
+    ✅ PERMITIDO (DEBES APROBAR):
+    - Códigos de artículo (ART), números de serie, marcas de repuestos.
 
-🚫 REGLAS ESTRICTAS - SUSPENDER SI HAY:
-1. Teléfonos/WhatsApp (ej. "0981123456", "+595...").
-2. Arrobas (@) con usuarios de redes sociales.
-3. Enlaces web, correos electrónicos.
-4. Frases de contacto directo: "escribime", "contactame al", "mi whatsapp".
+    🚫 REGLAS ESTRICTAS - SUSPENDER SI HAY:
+    1. Teléfonos/WhatsApp (ej. "0981123456", "+595...").
+    2. Arrobas (@) con usuarios de redes sociales.
+    3. Enlaces web, correos electrónicos.
+    4. Frases de contacto directo: "escribime", "contactame al", "mi whatsapp".
 
-Responde EXACTAMENTE:
-APROBAR o SUSPENDER
-"""
+    Responde EXACTAMENTE:
+    APROBAR o SUSPENDER
+    """
     payload = {
         "model": "llama-3.1-8b-instant",
         "messages": [{"role": "user", "content": prompt_texto}],
-        "temperature": 0.1
+        "temperature": 0
     }
     url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {
@@ -315,12 +325,14 @@ APROBAR o SUSPENDER
 
     try:
         resp = requests.post(url, json=payload, headers=headers, timeout=20)
+        resp.raise_for_status()
         respuesta = resp.json()["choices"][0]["message"]["content"].strip()
 
         if "SUSPENDER" in respuesta.upper():
             return "suspended", "Contacto detectado en el texto descriptivo."
         return "verified", "Aprobado automáticamente."
     except Exception as e:
+        print("Error IA Texto:", str(e))
         return "pending", f"Error IA Texto: {str(e)}"
 
 @app.route("/api/moderar-listing", methods=["POST"])
@@ -351,6 +363,7 @@ def moderar_listing():
             notificar_telegram(f"⚠️ Publicación en revisión manual\nTítulo: {listing.get('title', '')}\nMotivo: {nota}\nID: {listing_id}")
         return jsonify({"success": True, "listing_id": listing_id, "decision": decision, "nota": nota})
     except Exception as e:
+        print("Error moderar_listing:", str(e))
         return jsonify({"success": False, "error": str(e)}), 500
 
 # ---------------------------
@@ -532,7 +545,7 @@ def notificar_compra():
 
 @app.route("/", methods=["GET"])
 def home():
-    return jsonify({"status": "ok", "frontend_url": FRONTEND_URL})
+    return jsonify({"status": "ok", "frontend_url": FRONTEND_URL, "groq_configured": bool(GROQ_API_KEY)})
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)
