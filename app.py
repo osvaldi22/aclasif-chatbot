@@ -200,7 +200,7 @@ def obtener_imagen_base64(image_url):
         resp = requests.get(image_url, timeout=15)
         resp.raise_for_status()
         img = Image.open(BytesIO(resp.content))
-        if img.mode!= 'RGB': img = img.convert('RGB')
+        if img.mode != 'RGB': img = img.convert('RGB')
         img.thumbnail((1024, 1024))
         buffer = BytesIO()
         img.save(buffer, format="JPEG", quality=85)
@@ -246,12 +246,7 @@ def analizar_imagen_con_groq(image_url):
                 "role": "user",
                 "content": [
                     {"type": "text", "text": prompt_imagen},
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": f"data:image/jpeg;base64,{imagen_b64}"
-                        }
-                    }
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{imagen_b64}"}}
                 ]
             }
         ],
@@ -294,28 +289,30 @@ def analizar_listing_con_groq(title, description, image_url=None):
     if decision_imagen == "PENDIENTE": return "pending", f"Fallo de radar visual: {motivo_imagen}"
     elif decision_imagen == "SUSPENDER": return "suspended", f"Imagen: {motivo_imagen}"
 
-    prompt_texto = f"""Eres un moderador automático IMPLACABLE de Aclasif.
-    Detecta DATOS DE CONTACTO PERSONALES en el título/descripción.
+    prompt_texto = f"""Eres un moderador de clasificados. Tu tarea es buscar DATOS DE CONTACTO en el título o descripción.
 
     TÍTULO: {title}
     DESCRIPCIÓN: {description}
 
-    ✅ PERMITIDO (DEBES APROBAR):
-    - Códigos de artículo (ART), números de serie, marcas de repuestos.
+    REGLA PRINCIPAL: 
+    Si NO hay números de teléfono, correos o arrobas (@), debes aprobar obligatoriamente. Textos cortos, letras al azar (ej. "aaaaa"), o descripciones normales de productos son SEGUROS.
 
-    🚫 REGLAS ESTRICTAS - SUSPENDER SI HAY:
-    1. Teléfonos/WhatsApp (ej. "0981123456", "+595...").
-    2. Arrobas (@) con usuarios de redes sociales.
-    3. Enlaces web, correos electrónicos.
-    4. Frases de contacto directo: "escribime", "contactame al", "mi whatsapp".
+    ✅ DEBES APROBAR (Escribe 'APROBAR'):
+    - Textos sin contacto.
+    - Palabras al azar o descripciones de prueba cortas.
+    - Códigos de artículo (ART), números de serie o repuestos.
 
-    Responde EXACTAMENTE:
+    🚫 DEBES SUSPENDER (Escribe 'SUSPENDER'):
+    - Teléfonos o números de WhatsApp (ej. 0981..., +595...).
+    - Enlaces web externos, emails o usuarios de redes (@).
+
+    Responde ÚNICAMENTE con una de estas dos palabras:
     APROBAR o SUSPENDER
     """
     payload = {
         "model": "llama-3.1-8b-instant",
         "messages": [{"role": "user", "content": prompt_texto}],
-        "temperature": 0
+        "temperature": 0.0
     }
     url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {
@@ -433,19 +430,19 @@ def buscar_listing(producto="", article_code="", order=""):
                     if res.data: return res.data[0]
                 except: pass
 
-        posibles_codigos = [article_code] if article_code else []
-        if producto.upper().startswith("ART-"): posibles_codigos.append(producto)
-        for codigo in posibles_codigos:
-            try:
-                res = supabase.table("listings").select("*").ilike("article_code", f"%{codigo}%").limit(1).execute()
-                if res.data: return res.data[0]
-            except: pass
+    posibles_codigos = [article_code] if article_code else []
+    if producto.upper().startswith("ART-"): posibles_codigos.append(producto)
+    for codigo in posibles_codigos:
+        try:
+            res = supabase.table("listings").select("*").ilike("article_code", f"%{codigo}%").limit(1).execute()
+            if res.data: return res.data[0]
+        except: pass
 
-        if producto:
-            try:
-                res = supabase.table("listings").select("*").ilike("title", f"%{producto}%").limit(1).execute()
-                if res.data: return res.data[0]
-            except: pass
+    if producto:
+        try:
+            res = supabase.table("listings").select("*").ilike("title", f"%{producto}%").limit(1).execute()
+            if res.data: return res.data[0]
+        except: pass
     return None
 
 def buscar_perfil_vendedor(seller_id):
